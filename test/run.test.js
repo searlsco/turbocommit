@@ -1407,6 +1407,68 @@ describe('readClaudeAttribution', () => {
     }
   })
 
+  it('pushes after commit when push config is true', () => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-bare-'))
+    execSync('git init --bare', { cwd: bare, stdio: 'pipe' })
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-push-'))
+    execSync(`git clone ${bare} .`, { cwd: dir, stdio: 'pipe' })
+    execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' })
+    execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' })
+    const claudeDir = path.join(dir, '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    fs.writeFileSync(path.join(claudeDir, 'turbocommit.json'), JSON.stringify({
+      enabled: true,
+      push: true,
+      title: { type: 'transcript' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial" && git push', { cwd: dir, stdio: 'pipe' })
+
+    // Make a change and run turbocommit
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'content')
+    const transcript = makeTranscript([{ prompt: 'Add file', response: 'Done.' }])
+    trackWrite(dir, 'P1')
+    withCwd(dir, () => {
+      run(JSON.stringify({ transcript_path: transcript, session_id: 'P1' }))
+    })
+
+    // Verify the commit was pushed to the bare remote
+    const localHead = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim()
+    const remoteHead = execSync('git rev-parse HEAD', { cwd: bare, encoding: 'utf8' }).trim()
+    assert.equal(localHead, remoteHead)
+  })
+
+  it('does not push when push config is absent', () => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-bare-'))
+    execSync('git init --bare', { cwd: bare, stdio: 'pipe' })
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-nopush-'))
+    execSync(`git clone ${bare} .`, { cwd: dir, stdio: 'pipe' })
+    execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' })
+    execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' })
+    const claudeDir = path.join(dir, '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    fs.writeFileSync(path.join(claudeDir, 'turbocommit.json'), JSON.stringify({
+      enabled: true,
+      title: { type: 'transcript' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial" && git push', { cwd: dir, stdio: 'pipe' })
+    const initialRemoteHead = execSync('git rev-parse HEAD', { cwd: bare, encoding: 'utf8' }).trim()
+
+    // Make a change and run turbocommit (no push config)
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'content')
+    const transcript = makeTranscript([{ prompt: 'Add file', response: 'Done.' }])
+    trackWrite(dir, 'NP1')
+    withCwd(dir, () => {
+      run(JSON.stringify({ transcript_path: transcript, session_id: 'NP1' }))
+    })
+
+    // Local should have a new commit, remote should still be at initial
+    assert.equal(commitCount(dir), 2)
+    const remoteHead = execSync('git rev-parse HEAD', { cwd: bare, encoding: 'utf8' }).trim()
+    assert.equal(remoteHead, initialRemoteHead)
+  })
+
   it('project settings override global settings', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-home-'))
     const globalClaudeDir = path.join(home, '.claude')

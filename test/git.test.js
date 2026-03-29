@@ -5,7 +5,7 @@ const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
 const {
-  gitRoot, hasChanges, addAndCommit, hasCommits, currentBranch
+  gitRoot, hasChanges, addAndCommit, hasCommits, currentBranch, pushClean
 } = require('../lib/git')
 
 function makeRepo () {
@@ -108,5 +108,58 @@ describe('currentBranch', () => {
   it('returns HEAD for non-repo directory', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-nogit-'))
     assert.equal(currentBranch(dir), 'HEAD')
+  })
+})
+
+function makeRepoWithRemote () {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-bare-'))
+  execSync('git init --bare', { cwd: bare, stdio: 'pipe' })
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-clone-'))
+  execSync(`git clone ${bare} .`, { cwd: dir, stdio: 'pipe' })
+  execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' })
+  execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' })
+  fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+  execSync('git add -A && git commit -m "Initial" && git push', { cwd: dir, stdio: 'pipe' })
+  return { dir, bare }
+}
+
+describe('pushClean', () => {
+  it('returns true and pushes on clean fast-forward', () => {
+    const { dir, bare } = makeRepoWithRemote()
+    fs.writeFileSync(path.join(dir, 'new.txt'), 'content')
+    execSync('git add -A && git commit -m "local commit"', { cwd: dir, stdio: 'pipe' })
+    assert.equal(pushClean(dir), true)
+    const localHead = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim()
+    const remoteHead = execSync('git rev-parse HEAD', { cwd: bare, encoding: 'utf8' }).trim()
+    assert.equal(localHead, remoteHead)
+  })
+
+  it('returns false when remote is ahead', () => {
+    const { dir, bare } = makeRepoWithRemote()
+    // Simulate remote being ahead: clone a second copy, commit+push from it
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-clone2-'))
+    execSync(`git clone ${bare} .`, { cwd: dir2, stdio: 'pipe' })
+    execSync('git config user.email "test@test.com"', { cwd: dir2, stdio: 'pipe' })
+    execSync('git config user.name "Test"', { cwd: dir2, stdio: 'pipe' })
+    fs.writeFileSync(path.join(dir2, 'other.txt'), 'from clone2')
+    execSync('git add -A && git commit -m "remote ahead" && git push', { cwd: dir2, stdio: 'pipe' })
+    // Now make a local commit in the original clone (diverged)
+    fs.writeFileSync(path.join(dir, 'local.txt'), 'local change')
+    execSync('git add -A && git commit -m "local commit"', { cwd: dir, stdio: 'pipe' })
+    assert.equal(pushClean(dir), false)
+  })
+
+  it('returns false when no remote configured', () => {
+    const dir = makeRepoWithCommit()
+    assert.equal(pushClean(dir), false)
+  })
+
+  it('returns false on detached HEAD', () => {
+    const { dir } = makeRepoWithRemote()
+    const sha = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim()
+    execSync(`git checkout ${sha}`, { cwd: dir, stdio: 'pipe', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+    fs.writeFileSync(path.join(dir, 'detached.txt'), 'content')
+    execSync('git add -A && git commit -m "detached"', { cwd: dir, stdio: 'pipe' })
+    assert.equal(pushClean(dir), false)
   })
 })

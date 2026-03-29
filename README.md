@@ -136,6 +136,12 @@ Here's every property with its default:
   //   "Name <email>" → custom trailer value
   "coauthor": true,
 
+  // Auto-push after each turbocommit.
+  // Only pushes when fast-forward is possible (never forces).
+  //   true  → push after each commit
+  //   false → don't push (default)
+  "push": false,
+
   "title": {
     // "agent" (default) → run a title agent to generate the headline
     // "transcript"      → extract the first prompt as the headline

@@ -69,21 +69,25 @@ function cleanEnv () {
   return env
 }
 
-function runClaude (dir, prompt) {
+function runClaude (dir, prompt, { retries = 0, check } = {}) {
   // Clean env: strip all CLAUDE* and turbocommit/prove_it vars to prevent
   // the outer session from interfering with the inner claude -p
-  const r = spawnSync('claude -p --model haiku', {
-    cwd: dir,
-    shell: true,
-    encoding: 'utf8',
-    input: prompt,
-    timeout: 120_000,
-    env: cleanEnv()
-  })
-  if (r.status !== 0) {
-    throw new Error(`claude exited ${r.status}: ${r.stderr}`)
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const r = spawnSync('claude -p --model haiku', {
+      cwd: dir,
+      shell: true,
+      encoding: 'utf8',
+      input: prompt,
+      timeout: 120_000,
+      env: cleanEnv()
+    })
+    if (r.status !== 0) {
+      if (attempt < retries) continue
+      throw new Error(`claude exited ${r.status}: ${r.stderr}`)
+    }
+    if (check && !check() && attempt < retries) continue
+    return r.stdout
   }
-  return r.stdout
 }
 
 describe('integration', { skip: SKIP }, () => {
@@ -92,7 +96,11 @@ describe('integration', { skip: SKIP }, () => {
     const before = commitCount(dir)
 
     // Ask Claude to write a file — this triggers PreToolUse tracking + Stop commit
-    runClaude(dir, 'Create a file called hello.txt containing "hello world". Use the Write tool.')
+    // Retry up to 2 times because LLM may not follow the Write instruction
+    runClaude(dir, 'Create a file called hello.txt containing "hello world". Use the Write tool.', {
+      retries: 2,
+      check: () => commitCount(dir) > before
+    })
 
     const hookFired = fs.existsSync(hookLog)
     const after = commitCount(dir)
@@ -103,7 +111,10 @@ describe('integration', { skip: SKIP }, () => {
   it('turbocommit appends co-authored-by trailer', () => {
     const { dir } = makeProject()
 
-    runClaude(dir, 'Create a file called test.txt containing "test". Use the Write tool.')
+    runClaude(dir, 'Create a file called test.txt containing "test". Use the Write tool.', {
+      retries: 2,
+      check: () => commitCount(dir) > 1
+    })
 
     const after = commitCount(dir)
     assert.ok(after > 1, `expected turbocommit commit, got ${after} commits`)
