@@ -92,10 +92,14 @@ describe('run', () => {
   let realHome
   before(() => {
     realHome = process.env.HOME
+    // Clear TURBOCOMMIT_DISABLED so run() doesn't bail early.
+    // Tests that exercise TURBOCOMMIT_DISABLED manage it via try/finally.
+    delete process.env.TURBOCOMMIT_DISABLED
   })
   // Each test gets a fresh HOME so global config never leaks between tests
   beforeEach(() => {
     process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-home-'))
+    delete process.env.TURBOCOMMIT_DISABLED
   })
   after(() => {
     process.env.HOME = realHome
@@ -1110,6 +1114,35 @@ describe('run', () => {
     })
     const body = lastBody(dir)
     assert.ok(body.includes(longResponse), 'long line should not be wrapped')
+  })
+
+  it('redacts env var values from commit body and headline', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'changed')
+    const secret = 'super-secret-value-12345'
+    process.env.TC_TEST_SECRET = secret
+    try {
+      const transcript = makeTranscript([{
+        prompt: `My key is ${secret} please use it`,
+        response: `OK I will use ${secret} for the deploy`
+      }])
+      trackWrite(dir, 'S1')
+      withCwd(dir, () => {
+        run(JSON.stringify({ transcript_path: transcript, session_id: 'S1' }))
+      })
+      const body = lastBody(dir)
+      const subject = lastSubject(dir)
+      assert.ok(!body.includes(secret), 'body should not contain the secret value')
+      assert.ok(body.includes('[REDACTED:TC_TEST_SECRET]'), 'body should contain redaction marker')
+      assert.ok(!subject.includes(secret), 'subject should not contain the secret value')
+      // Monitor log should also be redacted
+      const logFile = path.join(process.env.HOME, '.claude', 'turbocommit', 'monitor.jsonl')
+      const logContent = fs.readFileSync(logFile, 'utf8')
+      assert.ok(!logContent.includes(secret), 'monitor log should not contain the secret value')
+    } finally {
+      delete process.env.TC_TEST_SECRET
+    }
   })
 })
 
