@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const { execSync } = require('child_process')
 const {
   handleSessionEnd,
   handleSessionStart,
@@ -24,9 +25,39 @@ const {
 
 function tmpRoot () {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-session-'))
-  fs.mkdirSync(path.join(dir, '.git'), { recursive: true })
+  execSync('git init -q', { cwd: dir, stdio: 'pipe' })
+  execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' })
+  execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' })
+  execSync('git commit --allow-empty -q -m init', { cwd: dir, stdio: 'pipe' })
   return dir
 }
+
+function tmpWorktree (mainRoot, branch) {
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-session-wt-'))
+  fs.rmdirSync(wt)
+  execSync(`git worktree add -q -b ${branch} "${wt}"`, { cwd: mainRoot, stdio: 'pipe' })
+  return wt
+}
+
+describe('worktree support', () => {
+  it('writes breadcrumbs and watermarks under the main repo common git dir', () => {
+    const main = tmpRoot()
+    const wt = tmpWorktree(main, 'feature-wt')
+
+    handleSessionEnd(JSON.stringify({ session_id: 'W1' }), wt)
+    saveWatermark(wt, 'W1', 2, 'deadbeef')
+
+    const mainResolved = fs.realpathSync(main)
+    const expectedBreadcrumb = path.join(mainResolved, '.git', 'turbocommit', 'breadcrumbs', 'W1.json')
+    const expectedWatermark = path.join(mainResolved, '.git', 'turbocommit', 'watermarks', 'W1.json')
+    assert.ok(fs.existsSync(expectedBreadcrumb), `breadcrumb should land in main .git: ${expectedBreadcrumb}`)
+    assert.ok(fs.existsSync(expectedWatermark), `watermark should land in main .git: ${expectedWatermark}`)
+
+    // And worktree + main resolve to same state, so a session started in main
+    // can see the breadcrumb dropped in the worktree.
+    assert.equal(fs.realpathSync(breadcrumbDir(main)), fs.realpathSync(breadcrumbDir(wt)))
+  })
+})
 
 describe('handleSessionEnd', () => {
   let root

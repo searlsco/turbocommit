@@ -5,7 +5,7 @@ const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
 const {
-  gitRoot, hasChanges, addAndCommit, hasCommits, currentBranch, pushClean
+  gitRoot, gitCommonDir, hasChanges, addAndCommit, hasCommits, currentBranch, pushClean
 } = require('../lib/git')
 
 function makeRepo () {
@@ -34,6 +34,33 @@ describe('gitRoot', () => {
   it('returns null for non-repo', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-nogit-'))
     assert.equal(gitRoot(dir), null)
+  })
+})
+
+describe('gitCommonDir', () => {
+  it('returns .git inside a normal repo', () => {
+    const dir = makeRepo()
+    // Callers pass a realpath-resolved root (from gitRoot). Git returns `.git`
+    // as a relative path, which we resolve against that cwd.
+    const root = fs.realpathSync(dir)
+    assert.equal(gitCommonDir(root), path.join(root, '.git'))
+  })
+
+  it('returns the main repo\'s .git when called from inside a worktree', () => {
+    const main = makeRepoWithCommit()
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-git-wt-'))
+    fs.rmdirSync(wt)
+    execSync(`git worktree add -q -b feature "${wt}"`, { cwd: main, stdio: 'pipe' })
+
+    const mainResolved = fs.realpathSync(main)
+    const result = gitCommonDir(fs.realpathSync(wt))
+    // Git returns an absolute path here (points to main repo, not worktree cwd).
+    assert.equal(result, path.join(mainResolved, '.git'))
+  })
+
+  it('returns null for non-git directory', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-nogit-gcd-'))
+    assert.equal(gitCommonDir(dir), null)
   })
 })
 

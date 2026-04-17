@@ -3,12 +3,24 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const { execSync } = require('child_process')
 const { handleTrack, hasTrackedModifications, cleanupTracking, extractFilePath, trackingPath } = require('../lib/track')
 
 function tmpRoot () {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-track-'))
-  fs.mkdirSync(path.join(dir, '.git'), { recursive: true })
+  execSync('git init -q', { cwd: dir, stdio: 'pipe' })
+  execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' })
+  execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' })
+  execSync('git commit --allow-empty -q -m init', { cwd: dir, stdio: 'pipe' })
   return dir
+}
+
+function tmpWorktree (mainRoot, branch) {
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-track-wt-'))
+  // Remove the empty dir so `git worktree add` can recreate it
+  fs.rmdirSync(wt)
+  execSync(`git worktree add -q -b ${branch} "${wt}"`, { cwd: mainRoot, stdio: 'pipe' })
+  return wt
 }
 
 function makeInput (overrides) {
@@ -194,6 +206,27 @@ describe('cleanupTracking', () => {
     const root = tmpRoot()
     cleanupTracking(root, 'nonexistent')
     // No crash
+  })
+})
+
+describe('worktree support', () => {
+  it('tracks modifications when invoked from a git worktree', () => {
+    const main = tmpRoot()
+    const wt = tmpWorktree(main, 'feature')
+
+    handleTrack(makeInput({ tool_name: 'Write', tool_input: { file_path: '/tmp/wt.txt' } }), wt)
+
+    assert.equal(hasTrackedModifications(wt, 'sess-1'), true, 'worktree session should record tracking')
+  })
+
+  it('stores tracking state under the main repo\'s common git dir', () => {
+    const main = tmpRoot()
+    const wt = tmpWorktree(main, 'feature-2')
+
+    handleTrack(makeInput({ tool_name: 'Write', tool_input: { file_path: '/tmp/wt.txt' } }), wt)
+
+    const mainTracking = path.join(fs.realpathSync(main), '.git', 'turbocommit', 'tracking', 'sess-1.jsonl')
+    assert.ok(fs.existsSync(mainTracking), `expected tracking file at ${mainTracking}`)
   })
 })
 
