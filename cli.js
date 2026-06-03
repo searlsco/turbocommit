@@ -3,26 +3,27 @@
 const { readStdin } = require('./lib/io')
 const { install, uninstall } = require('./lib/install')
 const { init, deinit } = require('./lib/init')
-const { run } = require('./lib/run')
+const { run, runPreCompact } = require('./lib/run')
 const { handleTrack } = require('./lib/track')
 const { handleSessionStart, handleSessionEnd } = require('./lib/session')
 const { doctor } = require('./lib/doctor')
 const { monitor } = require('./lib/monitor')
 const { gitRoot } = require('./lib/git')
+const { parseHarnessArg, normalizeHookInput } = require('./lib/harness')
 
 const VERSION = require('./package.json').version
 
 const USAGE = `turbocommit v${VERSION}
-Auto-commit after every Claude Code turn.
+Auto-commit after every AI coding agent turn.
 
 Commands:
-  install     Add turbocommit hooks to ~/.claude/settings.json
-  uninstall   Remove turbocommit from settings
-  init        Create .claude/turbocommit.json in current git repo
-  deinit      Remove .claude/turbocommit.json
+  install     Add turbocommit hooks to installed harnesses
+  uninstall   Remove turbocommit hooks
+  init        Create .turbocommit.json in current git repo
+  deinit      Remove turbocommit project config
   doctor      Check hook and config health
   monitor     Tail the event log (start/success/fail)
-  hook        Hook entry points (called by Claude Code, not manually)
+  hook        Hook entry points (called by harness hooks, not manually)
   help        Show this help text
   --version, -v  Show version
 
@@ -34,23 +35,30 @@ Usage:
 `
 
 function main (argv) {
-  const cmd = argv[0]
+  const parsed = parseHarnessArg(argv)
+  if (!parsed.ok) {
+    console.error(parsed.error)
+    console.error('Run "turbocommit help" for usage.')
+    process.exitCode = 1
+    return
+  }
+  const cmd = parsed.args[0]
 
   switch (cmd) {
     case 'install':
-      return cmdInstall()
+      return cmdInstall(parsed.harness)
     case 'uninstall':
-      return cmdUninstall()
+      return cmdUninstall(parsed.harness)
     case 'doctor':
-      return cmdDoctor()
+      return cmdDoctor(parsed.harness)
     case 'monitor':
-      return cmdMonitor()
+      return cmdMonitor(parsed.harness)
     case 'init':
       return cmdInit()
     case 'deinit':
       return cmdDeinit()
     case 'hook':
-      return cmdHook(argv.slice(1))
+      return cmdHook(parsed.args.slice(1), parsed.harness)
     case 'run':
       return cmdRunDeprecated()
     case '--version':
@@ -71,33 +79,42 @@ function main (argv) {
   }
 }
 
-function cmdInstall () {
-  const result = install()
-  if (result.alreadyInstalled) {
-    console.log('turbocommit already installed.')
-    console.log(`  Settings: ${result.settingsPath}`)
+function cmdInstall (harness) {
+  const result = install({ harness })
+  if (result.results.length === 0) {
+    console.log('No supported harness config dirs found.')
     return
   }
-  console.log('turbocommit installed.')
-  console.log(`  Settings: ${result.settingsPath}`)
+  for (const r of result.results) {
+    console.log(r.alreadyInstalled ? `turbocommit already installed for ${r.harness}.` : `turbocommit installed for ${r.harness}.`)
+    console.log(`  ${r.harness === 'codex' ? 'Hooks' : 'Settings'}: ${r.hooksPath || r.settingsPath}`)
+  }
   console.log('')
   console.log('════════════════════════════════════════════════════════════════════')
-  console.log('IMPORTANT: Restart Claude Code for the hooks to take effect.')
+  for (const r of result.results) {
+    if (r.harness === 'codex') {
+      console.log('IMPORTANT: Restart Codex and run /hooks to review turbocommit hooks.')
+    } else {
+      console.log('IMPORTANT: Restart Claude Code for the hooks to take effect.')
+    }
+  }
   console.log('════════════════════════════════════════════════════════════════════')
   console.log('')
   console.log('Next steps:')
-  console.log('  1. Restart Claude Code (required)')
+  console.log('  1. Restart the installed harness')
   console.log('  2. Run: turbocommit init  in a repo to enable auto-commits')
 }
 
-function cmdUninstall () {
-  const result = uninstall()
-  if (!result.wasInstalled) {
-    console.log('turbocommit was not installed.')
+function cmdUninstall (harness) {
+  const result = uninstall({ harness })
+  if (result.results.length === 0) {
+    console.log('No supported harness config dirs found.')
     return
   }
-  console.log('turbocommit uninstalled.')
-  console.log(`  Settings: ${result.settingsPath}`)
+  for (const r of result.results) {
+    console.log(r.wasInstalled ? `turbocommit uninstalled for ${r.harness}.` : `turbocommit was not installed for ${r.harness}.`)
+    console.log(`  ${r.harness === 'codex' ? 'Hooks' : 'Settings'}: ${r.hooksPath || r.settingsPath}`)
+  }
 }
 
 function cmdInit () {
@@ -124,16 +141,17 @@ function cmdDeinit () {
     return
   }
   if (!result.existed) {
-    console.log('turbocommit was not enabled in this repo.')
+    console.log('turbocommit project config was not found.')
+    console.log('Global config may still enable turbocommit.')
     return
   }
   console.log('turbocommit disabled.')
-  console.log(`  Removed: ${result.path}`)
+  for (const p of result.paths) console.log(`  Removed: ${p}`)
 }
 
-function cmdDoctor () {
+function cmdDoctor (harness) {
   const STATUS = { ok: '  ok', warn: 'warn', error: ' err', info: 'info' }
-  const result = doctor()
+  const result = doctor({ harness })
   for (const check of result.checks) {
     console.log(`[${STATUS[check.status] || check.status}] ${check.name}: ${check.message}`)
   }
@@ -142,34 +160,39 @@ function cmdDoctor () {
   }
 }
 
-function cmdMonitor () {
-  monitor()
+function cmdMonitor (harness) {
+  if (!monitor(harness)) process.exitCode = 1
 }
 
-function cmdHook (argv) {
+function cmdHook (argv, harness) {
   const event = argv[0]
   try {
     const input = readStdin()
-    const root = gitRoot()
+    const hookInput = normalizeHookInput(input, event, harness)
+    if (!hookInput) return
+    const root = gitRoot(hookInput.cwd || process.cwd())
     switch (event) {
       case 'pre-tool-use':
-        handleTrack(input, root)
+        handleTrack(hookInput, root)
         return
       case 'session-start':
-        handleSessionStart(input, root)
+        handleSessionStart(hookInput, root)
         return
       case 'session-end':
-        handleSessionEnd(input, root)
+        handleSessionEnd(hookInput, root)
+        return
+      case 'pre-compact':
+        runPreCompact(hookInput)
         return
       case 'stop':
-        run(input)
+        run(hookInput)
         break
       default:
-        // Unknown hook event — ignore silently (never fail)
+        // Unknown hook event: ignore silently (never fail)
         break
     }
   } catch {
-    // Never fail — fire and forget
+    // Never fail: fire and forget
   }
 }
 

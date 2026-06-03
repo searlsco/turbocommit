@@ -3,11 +3,20 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { install, uninstall, hasTurbocommit, isFullyInstalled, HOOK_DEFS } = require('../lib/install')
+const { install, uninstall, installCodex, uninstallCodex, hasTurbocommit, isFullyInstalled, isCodexFullyInstalled, HOOK_DEFS, CODEX_HOOK_DEFS } = require('../lib/install')
 
 function tmpSettings (content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-install-'))
   const file = path.join(dir, 'settings.json')
+  if (content !== undefined) {
+    fs.writeFileSync(file, JSON.stringify(content, null, 2))
+  }
+  return file
+}
+
+function tmpHooks (content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-codex-hooks-'))
+  const file = path.join(dir, 'hooks.json')
   if (content !== undefined) {
     fs.writeFileSync(file, JSON.stringify(content, null, 2))
   }
@@ -136,6 +145,59 @@ describe('install', () => {
     assert.ok(settings.hooks.Stop.some(g =>
       g.hooks.some(h => h.command === 'other-tool run')
     ))
+  })
+})
+
+describe('installCodex', () => {
+  it('installs all Codex hook events when no hooks exist', () => {
+    const file = tmpHooks({})
+
+    const result = installCodex(file)
+
+    assert.equal(result.alreadyInstalled, false)
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(isCodexFullyInstalled(hooks), true)
+    for (const event of Object.keys(CODEX_HOOK_DEFS)) {
+      assert.ok(hasTurbocommit(hooks.hooks[event]), `expected turbocommit in ${event}`)
+    }
+  })
+
+  it('preserves other Codex hooks', () => {
+    const file = tmpHooks({
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: 'other-tool stop' }] }]
+      }
+    })
+
+    installCodex(file)
+
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.ok(hooks.hooks.Stop.some(g =>
+      g.hooks.some(h => h.command === 'other-tool stop')
+    ))
+    assert.ok(hooks.hooks.Stop.some(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook stop')
+    ))
+  })
+})
+
+describe('uninstallCodex', () => {
+  it('removes only turbocommit Codex hooks', () => {
+    const file = tmpHooks({
+      hooks: {
+        Stop: [
+          { hooks: [{ type: 'command', command: 'other-tool stop' }] },
+          { hooks: [{ type: 'command', command: 'turbocommit hook stop' }] }
+        ]
+      }
+    })
+
+    const result = uninstallCodex(file)
+
+    assert.equal(result.wasInstalled, true)
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(hooks.hooks.Stop.length, 1)
+    assert.equal(hooks.hooks.Stop[0].hooks[0].command, 'other-tool stop')
   })
 })
 

@@ -5,7 +5,7 @@ const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
 const { doctor } = require('../lib/doctor')
-const { HOOK_DEFS } = require('../lib/install')
+const { HOOK_DEFS, CODEX_HOOK_DEFS } = require('../lib/install')
 
 function tmpSettings (content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-doctor-'))
@@ -30,6 +30,16 @@ function fullHookSettings (overrides) {
   return { hooks, ...overrides }
 }
 
+function fullCodexHooks (overrides) {
+  const hooks = {}
+  for (const [event, def] of Object.entries(CODEX_HOOK_DEFS)) {
+    const group = { hooks: [...def.hooks] }
+    if (def.matcher) group.matcher = def.matcher
+    hooks[event] = [group]
+  }
+  return { hooks, ...overrides }
+}
+
 function makeRepo () {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-doctor-'))
   execSync('git init', { cwd: dir, stdio: 'pipe' })
@@ -40,6 +50,10 @@ function writeLocalConfig (dir, config) {
   const claudeDir = path.join(dir, '.claude')
   fs.mkdirSync(claudeDir, { recursive: true })
   fs.writeFileSync(path.join(claudeDir, 'turbocommit.json'), JSON.stringify(config, null, 2))
+}
+
+function writeNeutralConfig (dir, config) {
+  fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify(config, null, 2))
 }
 
 function writeGlobalConfig (config) {
@@ -213,5 +227,34 @@ describe('doctor', () => {
     const localCheck = result.checks.find(c => c.name === 'Local config')
     assert.equal(localCheck.status, 'info')
     assert.ok(localCheck.message.includes('Not in a git repo'))
+  })
+
+  it('checks Codex hooks and reports hook trust as unknown', () => {
+    const repo = makeRepo()
+    writeNeutralConfig(repo, { enabled: true })
+    const hooksPath = tmpSettings(fullCodexHooks())
+
+    const result = doctor({ harness: 'codex', codexHooksPath: hooksPath, cwd: repo })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.checks.find(c => c.name === 'Codex hooks').status, 'ok')
+    const trustCheck = result.checks.find(c => c.name === 'Codex hook trust')
+    assert.equal(trustCheck.status, 'warn')
+    assert.ok(trustCheck.message.includes('/hooks'))
+  })
+
+  it('reports missing Codex hook events', () => {
+    const repo = makeRepo()
+    writeNeutralConfig(repo, { enabled: true })
+    const hooks = fullCodexHooks()
+    delete hooks.hooks.PreCompact
+    const hooksPath = tmpSettings(hooks)
+
+    const result = doctor({ harness: 'codex', codexHooksPath: hooksPath, cwd: repo })
+
+    assert.equal(result.ok, false)
+    const hookCheck = result.checks.find(c => c.name === 'Codex hooks')
+    assert.equal(hookCheck.status, 'error')
+    assert.ok(hookCheck.message.includes('PreCompact'))
   })
 })

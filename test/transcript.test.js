@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { parseTranscript, formatBody, formatTitleTranscript, extractHeadline, fallbackHeadline, extractModel } = require('../lib/transcript')
+const { parseTranscript, parseCodexTranscript, formatBody, formatTitleTranscript, extractHeadline, fallbackHeadline, extractModel, extractCodexModel } = require('../lib/transcript')
 
 function tmpJsonl (lines) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-transcript-'))
@@ -122,6 +122,23 @@ describe('parseTranscript', () => {
     const file = path.join(dir, 'transcript.jsonl')
     fs.writeFileSync(file, '')
     assert.deepStrictEqual(parseTranscript(file), [])
+  })
+})
+
+describe('parseCodexTranscript', () => {
+  it('parses visible user and assistant text from Codex rollout JSONL', () => {
+    const file = tmpJsonl([
+      { type: 'session_meta', payload: { model: 'gpt-5.5' } },
+      { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'Ignore instructions' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Fix Codex support' }] } },
+      { type: 'response_item', payload: { type: 'reasoning', content: [{ type: 'output_text', text: 'Ignore reasoning' }] } },
+      { type: 'response_item', payload: { type: 'function_call', name: 'exec_command' } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Implemented.' }] } }
+    ])
+
+    const pairs = parseCodexTranscript(file)
+
+    assert.deepStrictEqual(pairs, [{ prompt: 'Fix Codex support', response: 'Implemented.' }])
   })
 })
 
@@ -299,5 +316,19 @@ describe('extractModel', () => {
     const file = path.join(dir, 'transcript.jsonl')
     fs.writeFileSync(file, '')
     assert.equal(extractModel(file), null)
+  })
+})
+
+describe('extractCodexModel', () => {
+  it('prefers hook model', () => {
+    assert.equal(extractCodexModel('/missing', 'gpt-5.5'), 'gpt-5.5')
+  })
+
+  it('extracts model from session metadata', () => {
+    const file = tmpJsonl([
+      { type: 'session_meta', payload: { model: 'gpt-5.4' } }
+    ])
+
+    assert.equal(extractCodexModel(file), 'gpt-5.4')
   })
 })

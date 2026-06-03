@@ -4,7 +4,7 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
-const { run, formatModelName, resolveCoauthor, readClaudeAttribution } = require('../lib/run')
+const { run, runPreCompact, formatModelName, resolveCoauthor, readClaudeAttribution } = require('../lib/run')
 const { handleTrack } = require('../lib/track')
 const { savePending, chainDir, saveWatermark, readWatermark } = require('../lib/session')
 const { ensureDir } = require('../lib/io')
@@ -38,6 +38,25 @@ function makeTranscript (pairs, { model } = {}) {
     const msg = { content: [{ type: 'text', text: response }] }
     if (model) msg.model = model
     lines.push(JSON.stringify({ type: 'assistant', message: msg }))
+  }
+  fs.writeFileSync(file, lines.join('\n') + '\n')
+  return file
+}
+
+function makeCodexTranscript (pairs, { model } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-codex-transcript-'))
+  const file = path.join(dir, 'rollout.jsonl')
+  const lines = []
+  lines.push(JSON.stringify({ type: 'session_meta', payload: { model } }))
+  for (const { prompt, response } of pairs) {
+    lines.push(JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }
+    }))
+    lines.push(JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: response }] }
+    }))
   }
   fs.writeFileSync(file, lines.join('\n') + '\n')
   return file
@@ -149,6 +168,68 @@ describe('run', () => {
     } finally {
       delete process.env.TURBOCOMMIT_DISABLED
     }
+  })
+
+  it('commits Codex changes from Codex hook payload and rollout transcript', () => {
+    const dir = makeRepo()
+    fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify({
+      enabled: true,
+      title: { type: 'transcript' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    const transcript = makeCodexTranscript(
+      [{ prompt: 'Add Codex file', response: 'Created it.' }],
+      { model: 'gpt-5.5' }
+    )
+    const hookInput = {
+      hook_event_name: 'PreToolUse',
+      session_id: 'C1',
+      cwd: dir,
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(dir, 'codex.txt') }
+    }
+    handleTrack(JSON.stringify(hookInput), dir)
+    fs.writeFileSync(path.join(dir, 'codex.txt'), 'content')
+
+    run(JSON.stringify({
+      hook_event_name: 'Stop',
+      session_id: 'C1',
+      transcript_path: transcript,
+      cwd: dir,
+      model: 'gpt-5.5'
+    }))
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(lastSubject(dir), 'Add Codex file')
+    assert.ok(lastBody(dir).includes('Response:\nCreated it.'))
+    assert.ok(lastBody(dir).includes('Co-Authored-By: gpt-5.5 <noreply@openai.com>'))
+  })
+
+  it('buffers Codex PreCompact transcript and updates the session watermark', () => {
+    const dir = makeRepo()
+    fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify({ enabled: true }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    const transcript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'A plan.' },
+      { prompt: 'Refine plan', response: 'A better plan.' }
+    ])
+
+    runPreCompact(JSON.stringify({
+      hook_event_name: 'PreCompact',
+      session_id: 'C2',
+      transcript_path: transcript,
+      cwd: dir
+    }))
+
+    const pendingDir = path.join(dir, '.git', 'turbocommit', 'pending', 'C2')
+    const pendingFiles = fs.readdirSync(pendingDir)
+    assert.equal(pendingFiles.length, 1)
+    const pending = fs.readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8')
+    assert.ok(pending.includes('Plan Codex work'))
+    assert.ok(pending.includes('A better plan.'))
+    assert.deepEqual(readWatermark(dir, 'C2'), { pairs: 2 })
   })
 
   it('does nothing without config', () => {
