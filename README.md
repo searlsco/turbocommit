@@ -19,7 +19,7 @@ sessions concurrently and detangle which agent committed what after the fact.
 turbocommit registers hooks with the harnesses you use:
 
 - Claude Code: **PreToolUse**, **SessionStart**, **SessionEnd**, and **Stop**.
-- Codex: **PreToolUse**, **SessionStart**, **SessionEnd**, **PreCompact**, and
+- Codex: **PreToolUse**, **SessionStart**, **PreCompact**, and
   **Stop**.
 
 - **PreToolUse** tracks which sessions actually modify files (Write, Edit,

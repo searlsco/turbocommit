@@ -6,7 +6,7 @@ const os = require('os')
 const { execSync } = require('child_process')
 const { run, runPreCompact, formatModelName, resolveCoauthor, readClaudeAttribution } = require('../lib/run')
 const { handleTrack } = require('../lib/track')
-const { savePending, chainDir, saveWatermark, readWatermark } = require('../lib/session')
+const { handleSessionStart, savePending, chainDir, saveWatermark, readWatermark } = require('../lib/session')
 const { ensureDir } = require('../lib/io')
 
 function makeRepo () {
@@ -230,6 +230,47 @@ describe('run', () => {
     assert.ok(pending.includes('Plan Codex work'))
     assert.ok(pending.includes('A better plan.'))
     assert.deepEqual(readWatermark(dir, 'C2'), { pairs: 2 })
+  })
+
+  it('links Codex Stop to the next clear session for pending planning context', () => {
+    const dir = makeRepo()
+    fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify({
+      enabled: true,
+      title: { type: 'transcript' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    const planningTranscript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'Use the existing hook path.' }
+    ])
+
+    run(JSON.stringify({
+      hook_event_name: 'Stop',
+      session_id: 'C3',
+      transcript_path: planningTranscript,
+      cwd: dir
+    }))
+    handleSessionStart(JSON.stringify({
+      session_id: 'C4',
+      source: 'clear'
+    }), dir)
+    trackWrite(dir, 'C4', path.join(dir, 'codex-linked.txt'))
+    fs.writeFileSync(path.join(dir, 'codex-linked.txt'), 'content')
+    const implementationTranscript = makeCodexTranscript([
+      { prompt: 'Implement Codex work', response: 'Updated the file.' }
+    ])
+
+    run(JSON.stringify({
+      hook_event_name: 'Stop',
+      session_id: 'C4',
+      transcript_path: implementationTranscript,
+      cwd: dir
+    }))
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(lastSubject(dir), 'Implement Codex work')
+    assert.ok(lastBody(dir).includes('## Planning\n\nPrompt:\nPlan Codex work'))
+    assert.ok(lastBody(dir).includes('## Implementation\n\nPrompt:\nImplement Codex work'))
   })
 
   it('does nothing without config', () => {

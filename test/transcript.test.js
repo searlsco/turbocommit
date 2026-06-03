@@ -140,6 +140,18 @@ describe('parseCodexTranscript', () => {
 
     assert.deepStrictEqual(pairs, [{ prompt: 'Fix Codex support', response: 'Implemented.' }])
   })
+
+  it('skips automatic Codex system status messages', () => {
+    const file = tmpJsonl([
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Add the real feature' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '== System Status ==\n [automatic message added by system]\n\n cwd: /tmp/repo' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Implemented the real feature.' }] } }
+    ])
+
+    const pairs = parseCodexTranscript(file)
+
+    assert.deepStrictEqual(pairs, [{ prompt: 'Add the real feature', response: 'Implemented the real feature.' }])
+  })
 })
 
 describe('formatBody', () => {
