@@ -229,7 +229,125 @@ describe('run', () => {
     const pending = fs.readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8')
     assert.ok(pending.includes('Plan Codex work'))
     assert.ok(pending.includes('A better plan.'))
-    assert.deepEqual(readWatermark(dir, 'C2'), { pairs: 2 })
+    assert.deepEqual(readWatermark(dir, 'C2'), { pairs: 2, source: 'precompact', basePairs: 0 })
+  })
+
+  it('includes Codex PreCompact planning in a same-session commit', () => {
+    const dir = makeRepo()
+    fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify({
+      enabled: true,
+      title: { type: 'transcript' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    const planningTranscript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'Keep this planning.' },
+      { prompt: 'Refine Codex plan', response: 'Keep this detail.' }
+    ])
+
+    runPreCompact(JSON.stringify({
+      hook_event_name: 'PreCompact',
+      session_id: 'C2A',
+      transcript_path: planningTranscript,
+      cwd: dir
+    }))
+
+    trackWrite(dir, 'C2A', path.join(dir, 'codex-precompact.txt'))
+    fs.writeFileSync(path.join(dir, 'codex-precompact.txt'), 'content')
+    const implementationTranscript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'Keep this planning.' },
+      { prompt: 'Refine Codex plan', response: 'Keep this detail.' },
+      { prompt: 'Implement Codex work', response: 'Updated the file.' }
+    ])
+
+    run(JSON.stringify({
+      hook_event_name: 'Stop',
+      session_id: 'C2A',
+      transcript_path: implementationTranscript,
+      cwd: dir
+    }))
+
+    assert.equal(commitCount(dir), 2)
+    const body = lastBody(dir)
+    assert.ok(body.includes('## Planning\n\nPrompt:\nPlan Codex work'))
+    assert.ok(body.includes('## Implementation\n\nPrompt:\nImplement Codex work'))
+    assert.equal(body.split('Plan Codex work').length - 1, 1)
+  })
+
+  it('buffers only new Codex PreCompact transcript pairs', () => {
+    const dir = makeRepo()
+    fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify({ enabled: true }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    const firstTranscript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'A plan.' },
+      { prompt: 'Refine plan', response: 'A better plan.' }
+    ])
+
+    runPreCompact(JSON.stringify({
+      hook_event_name: 'PreCompact',
+      session_id: 'C2B',
+      transcript_path: firstTranscript,
+      cwd: dir
+    }))
+
+    const secondTranscript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'A plan.' },
+      { prompt: 'Refine plan', response: 'A better plan.' },
+      { prompt: 'Review plan', response: 'A final plan.' }
+    ])
+    runPreCompact(JSON.stringify({
+      hook_event_name: 'PreCompact',
+      session_id: 'C2B',
+      transcript_path: secondTranscript,
+      cwd: dir
+    }))
+
+    const pendingDir = path.join(dir, '.git', 'turbocommit', 'pending', 'C2B')
+    const pending = fs.readdirSync(pendingDir)
+      .sort()
+      .map(file => fs.readFileSync(path.join(pendingDir, file), 'utf8'))
+      .join('\n\n')
+    assert.equal(pending.split('Plan Codex work').length - 1, 1)
+    assert.equal(pending.split('Review plan').length - 1, 1)
+    assert.deepEqual(readWatermark(dir, 'C2B'), { pairs: 3, source: 'precompact', basePairs: 0 })
+  })
+
+  it('uses Codex PreCompact planning once when Stop has no newer transcript pairs', () => {
+    const dir = makeRepo()
+    fs.writeFileSync(path.join(dir, '.turbocommit.json'), JSON.stringify({
+      enabled: true,
+      title: { type: 'transcript' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    const transcript = makeCodexTranscript([
+      { prompt: 'Plan Codex work', response: 'Keep this planning.' },
+      { prompt: 'Refine Codex plan', response: 'Keep this detail.' }
+    ])
+
+    runPreCompact(JSON.stringify({
+      hook_event_name: 'PreCompact',
+      session_id: 'C2C',
+      transcript_path: transcript,
+      cwd: dir
+    }))
+    trackWrite(dir, 'C2C', path.join(dir, 'codex-same-turn.txt'))
+    fs.writeFileSync(path.join(dir, 'codex-same-turn.txt'), 'content')
+
+    run(JSON.stringify({
+      hook_event_name: 'Stop',
+      session_id: 'C2C',
+      transcript_path: transcript,
+      cwd: dir
+    }))
+
+    assert.equal(commitCount(dir), 2)
+    const body = lastBody(dir)
+    assert.ok(!body.includes('## Planning'))
+    assert.ok(body.includes('Plan Codex work'))
+    assert.ok(body.includes('Refine Codex plan'))
+    assert.equal(body.split('Plan Codex work').length - 1, 1)
   })
 
   it('links Codex Stop to the next clear session for pending planning context', () => {
