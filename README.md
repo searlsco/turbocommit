@@ -2,28 +2,32 @@
 
 # turbocommit
 
-turbocommit creates a git commit containing everything Claude Code changes 
-on each turn. Think of it like save state in a game emulator: whenever you 
-fall in a pit, you can safely rewind and try again.
+turbocommit creates a git commit containing everything Claude Code or Codex
+changes on each turn. Think of it like save state in a game emulator: whenever
+you fall in a pit, you can safely rewind and try again.
 
 Captures every prompt/response transcript for the associated changes so you 
 and your agent never lose the thread on what you were doing after the fact,
 even if you didn't leave behind any comments or docs.
 
-Each commit also [links back to the previous commit from the same Claude Code
-session](#continuity-across-workstreams), so you can run multiple agent 
+Each commit also [links back to the previous commit from the same agent
+session](#continuity-across-workstreams), so you can run multiple agent
 sessions concurrently and detangle which agent committed what after the fact.
 
 ## How it works
 
-turbocommit registers four hooks with Claude Code: **PreToolUse**,
-**SessionStart**, **SessionEnd**, and **Stop**.
+turbocommit registers hooks with the harnesses you use:
+
+- Claude Code: **PreToolUse**, **SessionStart**, **SessionEnd**, and **Stop**.
+- Codex: **PreToolUse**, **SessionStart**, **PreCompact**, and
+  **Stop**.
 
 - **PreToolUse** tracks which sessions actually modify files (Write, Edit,
   MultiEdit, NotebookEdit, MCP tools). Read-only sessions (Grep, Read,
   Bash-only) are never committed.
 - **SessionStart / SessionEnd** chain sessions across `/clear` boundaries
   so planning context survives into the eventual commit.
+- **PreCompact** on Codex buffers visible transcript context before compaction.
 - **Stop** fires after every turn. If the session modified files, it
   commits with `git add -A`. If not, it buffers the transcript for pickup
   by a later session that does commit.
@@ -38,6 +42,22 @@ context was buffered from ancestor sessions, it appears under a
 ```bash
 brew install searlsco/tap/turbocommit
 turbocommit install
+```
+
+Or install from npm:
+
+```bash
+npm install -g @searls/turbocommit
+turbocommit install
+```
+
+With no flags, `turbocommit install` installs into existing harness config
+directories only: `~/.claude` and/or `~/.codex`. To force one harness and create
+its config directory if needed:
+
+```bash
+turbocommit install --harness claude
+turbocommit install --harness codex
 ```
 
 Then enable it per-project:
@@ -57,20 +77,24 @@ brew uninstall turbocommit
 
 ## Where turbocommit goes in your hook chain
 
-`turbocommit install` adds one hook group per event (PreToolUse,
-SessionStart, SessionEnd, Stop). The hooks are fire-and-forget: they
-always exit 0 and never block Claude.
+`turbocommit install` adds one hook group per event for each installed harness.
+The hooks are fire-and-forget: they always exit 0 and never block the agent.
 
-If you rearrange your hooks manually, the turbocommit hooks can go
-anywhere — order doesn't matter since they never block.
+If you rearrange your hooks manually, the turbocommit hooks can go anywhere.
+Order doesn't matter since they never block.
+
+Codex users should restart Codex and run `/hooks` after install to review and
+trust the hook commands.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `turbocommit install` | Add hooks to `~/.claude/settings.json` |
+| `turbocommit install` | Add hooks to existing Claude and/or Codex config dirs |
+| `turbocommit install --harness claude` | Add hooks to `~/.claude/settings.json` |
+| `turbocommit install --harness codex` | Add hooks to `~/.codex/hooks.json` |
 | `turbocommit uninstall` | Remove them |
-| `turbocommit init` | Create `.claude/turbocommit.json` in current repo |
+| `turbocommit init` | Create `.turbocommit.json` in current repo |
 | `turbocommit deinit` | Remove it |
 | `turbocommit doctor` | Check hook and config health |
 | `turbocommit monitor` | Tail the event log (start/success/skip/fail) |
@@ -80,8 +104,8 @@ anywhere — order doesn't matter since they never block.
 ## Continuity across workstreams
 
 Every turbocommit adds a `Continuation of <SHA>` reference linking back to
-the previous commit from the same Claude session. This means you can run
-multiple sessions in parallel — different tabs, different tasks — all
+the previous commit from the same agent session. This means you can run
+multiple sessions in parallel, across different tabs and different tasks, all
 committing to a single branch, and still trace each logical workstream
 by following the SHA chain.
 
@@ -119,9 +143,24 @@ is traceable.
 
 ## Configuration
 
-`turbocommit init` creates `.claude/turbocommit.json` with `{"enabled": true}`.
-You can also place a global config at `~/.claude/turbocommit.json` — project
-config is deep-merged on top.
+`turbocommit init` creates `.turbocommit.json` with `{"enabled": true}`.
+The legacy project path `.claude/turbocommit.json` is still read when the
+neutral file is absent.
+
+Global config follows the XDG Unix config standard:
+
+```text
+$XDG_CONFIG_HOME/turbocommit/config.json
+```
+
+When `XDG_CONFIG_HOME` is unset, turbocommit reads:
+
+```text
+~/.config/turbocommit/config.json
+```
+
+The legacy global path `~/.claude/turbocommit.json` is still read when the XDG
+file is absent. Project config is deep-merged on top of global config.
 
 Here's every property with its default:
 
@@ -152,7 +191,7 @@ Here's every property with its default:
 
     // Prompt template sent to the title agent. Use {{transcript}} as the
     // placeholder for the session transcript.
-    "prompt": "You have 10 seconds. Write a single-line git commit headline (max 72 chars) from this coding session transcript. Speed over perfection — a rough title beats no title.\n\nRules:\n- Imperative mood (\"Add\", \"Fix\", \"Update\")\n- Specific about what changed\n- No trailing period\n- No conventional commit prefixes unless clearly a fix/feat\n\nTranscript:\n{{transcript}}\n\nRespond with ONLY the headline, nothing else. Do not deliberate."
+    "prompt": "You have 10 seconds. Write a single-line git commit headline (max 72 chars) from this coding session transcript. Speed over perfection: a rough title beats no title.\n\nRules:\n- Imperative mood (\"Add\", \"Fix\", \"Update\")\n- Specific about what changed\n- No trailing period\n- No conventional commit prefixes unless clearly a fix/feat\n\nTranscript:\n{{transcript}}\n\nRespond with ONLY the headline, nothing else. Do not deliberate."
   },
 
   "body": {
@@ -165,7 +204,7 @@ Here's every property with its default:
 
     // Prompt template sent to the body agent. Use {{transcript}} as the
     // placeholder for the session transcript.
-    "prompt": "Given this transcript of a coding session, write a concise git commit body.\n\nRules:\n- Summarize what was done and why\n- Be concise — a few sentences or bullet points\n- Focus on the \"why\" more than the \"what\"\n\nTranscript:\n{{transcript}}\n\nRespond with ONLY the commit body, nothing else.",
+    "prompt": "Given this transcript of a coding session, write a concise git commit body.\n\nRules:\n- Summarize what was done and why\n- Be concise: a few sentences or bullet points\n- Focus on the \"why\" more than the \"what\"\n\nTranscript:\n{{transcript}}\n\nRespond with ONLY the commit body, nothing else.",
 
     // Wrap prose lines at this width. Code blocks, tables, headers, and
     // other structured content are preserved verbatim.
@@ -182,4 +221,4 @@ runtime without changing config.
 
 - Node.js >= 18
 - Git
-- Claude Code
+- Claude Code or Codex CLI

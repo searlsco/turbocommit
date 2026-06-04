@@ -1,7 +1,7 @@
 {
   "name": "@searls/turbocommit",
   "version": "0.12.1",
-  "description": "Auto-commit after every Claude Code turn",
+  "description": "Auto-commit after every AI coding agent turn",
   "bin": {
     "turbocommit": "./cli.js"
   },
@@ -19,6 +19,9 @@
   "keywords": [
     "claude",
     "claude-code",
+    "codex",
+    "openai-codex",
+    "ai-agent",
     "git",
     "auto-commit"
   ],

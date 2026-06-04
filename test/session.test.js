@@ -257,6 +257,15 @@ describe('savePending / collectPending', () => {
     assert.equal(result[1], 'turn 2')
   })
 
+  it('filters sourced pending without changing chronological collection', () => {
+    savePending(root, 'A', 'turn 1')
+    savePending(root, 'A', 'precompact turn', { source: 'precompact' })
+    savePending(root, 'A', 'turn 2')
+
+    assert.deepEqual(collectPending(root, ['A']), ['turn 1', 'precompact turn', 'turn 2'])
+    assert.deepEqual(collectPending(root, ['A'], { source: 'precompact' }), ['precompact turn'])
+  })
+
   it('skips sessions with no pending', () => {
     savePending(root, 'B', 'transcript B')
     const result = collectPending(root, ['A', 'B'])
