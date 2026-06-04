@@ -152,6 +152,67 @@ describe('parseCodexTranscript', () => {
 
     assert.deepStrictEqual(pairs, [{ prompt: 'Add the real feature', response: 'Implemented the real feature.' }])
   })
+
+  it('strips Codex AGENTS context from the first user-visible prompt', () => {
+    const file = tmpJsonl([
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: [
+              '# AGENTS.md instructions for /tmp/project',
+              '',
+              '<INSTRUCTIONS>',
+              'Do the project-specific things.',
+              '</INSTRUCTIONS><environment_context>',
+              '  <cwd>/tmp/project</cwd>',
+              '</environment_context>',
+              'Fix Codex commit messages'
+            ].join('\n')
+          }]
+        }
+      },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixed.' }] } }
+    ])
+
+    const pairs = parseCodexTranscript(file)
+
+    assert.deepStrictEqual(pairs, [{ prompt: 'Fix Codex commit messages', response: 'Fixed.' }])
+  })
+
+  it('drops Codex AGENTS context prompts when no real prompt remains', () => {
+    const file = tmpJsonl([
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: [
+              '# AGENTS.md instructions for /tmp/project',
+              '',
+              '<INSTRUCTIONS>',
+              'Do the project-specific things.',
+              '</INSTRUCTIONS><environment_context>',
+              '  <cwd>/tmp/project</cwd>',
+              '</environment_context>'
+            ].join('\n')
+          }]
+        }
+      },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Ignored bootstrap response.' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Fix the real bug' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixed the real bug.' }] } }
+    ])
+
+    const pairs = parseCodexTranscript(file)
+
+    assert.deepStrictEqual(pairs, [{ prompt: 'Fix the real bug', response: 'Fixed the real bug.' }])
+  })
 })
 
 describe('formatBody', () => {
