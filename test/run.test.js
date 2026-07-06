@@ -198,7 +198,7 @@ describe('run', () => {
       transcript_path: transcript,
       cwd: dir,
       model: 'gpt-5.5'
-    }))
+    }), { harness: 'codex' })
 
     assert.equal(commitCount(dir), 2)
     assert.equal(lastSubject(dir), 'Add Codex file')
@@ -221,7 +221,7 @@ describe('run', () => {
       session_id: 'C2',
       transcript_path: transcript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     const pendingDir = path.join(dir, '.git', 'turbocommit', 'pending', 'C2')
     const pendingFiles = fs.readdirSync(pendingDir)
@@ -250,7 +250,7 @@ describe('run', () => {
       session_id: 'C2A',
       transcript_path: planningTranscript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     trackWrite(dir, 'C2A', path.join(dir, 'codex-precompact.txt'))
     fs.writeFileSync(path.join(dir, 'codex-precompact.txt'), 'content')
@@ -265,7 +265,7 @@ describe('run', () => {
       session_id: 'C2A',
       transcript_path: implementationTranscript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     assert.equal(commitCount(dir), 2)
     const body = lastBody(dir)
@@ -289,7 +289,7 @@ describe('run', () => {
       session_id: 'C2B',
       transcript_path: firstTranscript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     const secondTranscript = makeCodexTranscript([
       { prompt: 'Plan Codex work', response: 'A plan.' },
@@ -301,7 +301,7 @@ describe('run', () => {
       session_id: 'C2B',
       transcript_path: secondTranscript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     const pendingDir = path.join(dir, '.git', 'turbocommit', 'pending', 'C2B')
     const pending = fs.readdirSync(pendingDir)
@@ -331,7 +331,7 @@ describe('run', () => {
       session_id: 'C2C',
       transcript_path: transcript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
     trackWrite(dir, 'C2C', path.join(dir, 'codex-same-turn.txt'))
     fs.writeFileSync(path.join(dir, 'codex-same-turn.txt'), 'content')
 
@@ -340,7 +340,7 @@ describe('run', () => {
       session_id: 'C2C',
       transcript_path: transcript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     assert.equal(commitCount(dir), 2)
     const body = lastBody(dir)
@@ -367,7 +367,7 @@ describe('run', () => {
       session_id: 'C3',
       transcript_path: planningTranscript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
     handleSessionStart(JSON.stringify({
       session_id: 'C4',
       source: 'clear'
@@ -383,7 +383,7 @@ describe('run', () => {
       session_id: 'C4',
       transcript_path: implementationTranscript,
       cwd: dir
-    }))
+    }), { harness: 'codex' })
 
     assert.equal(commitCount(dir), 2)
     assert.equal(lastSubject(dir), 'Implement Codex work')

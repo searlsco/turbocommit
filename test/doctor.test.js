@@ -115,6 +115,24 @@ describe('doctor', () => {
     assert.ok(hookCheck.message.includes('Missing'))
   })
 
+  it('errors on a legacy flagless install and tells the user to reinstall', () => {
+    // All events carry turbocommit hooks, but without the --harness flag the
+    // Stop hook misroutes Claude sessions into the Codex parser. Doctor should
+    // flag this as outdated rather than report an empty "Missing hooks" list.
+    const hooks = {}
+    for (const event of Object.keys(HOOK_DEFS)) {
+      const command = `turbocommit hook ${event === 'PreToolUse' ? 'pre-tool-use' : event === 'SessionStart' ? 'session-start' : event === 'SessionEnd' ? 'session-end' : 'stop'}`
+      hooks[event] = [{ hooks: [{ type: 'command', command }] }]
+    }
+    const settings = tmpSettings({ hooks })
+    const result = doctor(settings, os.tmpdir())
+    assert.equal(result.ok, false)
+    const hookCheck = result.checks.find(c => c.name === 'Hooks installed')
+    assert.equal(hookCheck.status, 'error')
+    assert.ok(/outdated|--harness|reinstall|turbocommit install/i.test(hookCheck.message), `unhelpful message: ${hookCheck.message}`)
+    assert.ok(!/Missing hooks:\s*\./.test(hookCheck.message), 'should not report an empty missing-hooks list')
+  })
+
   it('warns when turbocommit shares a Stop group with other hooks', () => {
     const repo = makeRepo()
     writeLocalConfig(repo, { enabled: true })
@@ -123,7 +141,7 @@ describe('doctor', () => {
     s.hooks.Stop = [{
       hooks: [
         { type: 'command', command: 'prove_it hook claude:Stop' },
-        { type: 'command', command: 'turbocommit hook stop' }
+        { type: 'command', command: 'turbocommit hook stop --harness claude' }
       ]
     }]
     const settings = tmpSettings(s)
@@ -139,7 +157,7 @@ describe('doctor', () => {
     writeLocalConfig(repo, { enabled: true })
     const s = fullHookSettings()
     s.hooks.Stop = [
-      { hooks: [{ type: 'command', command: 'turbocommit hook stop' }] },
+      { hooks: [{ type: 'command', command: 'turbocommit hook stop --harness claude' }] },
       { hooks: [{ type: 'command', command: 'later-group-hook' }] }
     ]
     const settings = tmpSettings(s)
@@ -157,7 +175,7 @@ describe('doctor', () => {
     const s = fullHookSettings()
     s.hooks.Stop = [
       { hooks: [{ type: 'command', command: 'hook-a' }, { type: 'command', command: 'hook-b' }] },
-      { hooks: [{ type: 'command', command: 'turbocommit hook stop' }] }
+      { hooks: [{ type: 'command', command: 'turbocommit hook stop --harness claude' }] }
     ]
     const settings = tmpSettings(s)
 

@@ -47,14 +47,14 @@ describe('install', () => {
     assert.ok(ptGroup.matcher.includes('mcp__'))
   })
 
-  it('Stop hook uses turbocommit hook stop command', () => {
+  it('Stop hook uses turbocommit hook stop command with explicit harness', () => {
     const file = tmpSettings({})
     install(file)
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
     const stopHook = settings.hooks.Stop
       .flatMap(g => g.hooks)
       .find(h => h.command && h.command.includes('turbocommit'))
-    assert.equal(stopHook.command, 'turbocommit hook stop')
+    assert.equal(stopHook.command, 'turbocommit hook stop --harness claude')
   })
 
   it('creates own group after existing groups in each event', () => {
@@ -77,7 +77,7 @@ describe('install', () => {
     // Stop: existing + turbocommit
     assert.equal(settings.hooks.Stop.length, 2)
     assert.equal(settings.hooks.Stop[0].hooks[0].command, 'prove_it hook claude:Stop')
-    assert.equal(settings.hooks.Stop[1].hooks[0].command, 'turbocommit hook stop')
+    assert.equal(settings.hooks.Stop[1].hooks[0].command, 'turbocommit hook stop --harness claude')
     // PreToolUse: existing + turbocommit
     assert.equal(settings.hooks.PreToolUse.length, 2)
     assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, 'prove_it hook claude:PreToolUse')
@@ -127,7 +127,38 @@ describe('install', () => {
       .map(h => h.command)
     assert.ok(!allCommands.includes('turbocommit run'))
     // New hooks should be installed
-    assert.ok(allCommands.includes('turbocommit hook stop'))
+    assert.ok(allCommands.includes('turbocommit hook stop --harness claude'))
+  })
+
+  it('upgrades a legacy flagless install to the explicit --harness command', () => {
+    // Legacy installs registered `turbocommit hook stop` with no harness flag,
+    // which the (now fixed) inference misrouted. Re-installing must rewrite them.
+    const file = tmpSettings({
+      hooks: {
+        PreToolUse: [{ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*', hooks: [{ type: 'command', command: 'turbocommit hook pre-tool-use' }] }],
+        SessionStart: [{ hooks: [{ type: 'command', command: 'turbocommit hook session-start' }] }],
+        SessionEnd: [{ hooks: [{ type: 'command', command: 'turbocommit hook session-end' }] }],
+        Stop: [{ hooks: [{ type: 'command', command: 'turbocommit hook stop' }] }]
+      }
+    })
+    const result = install(file)
+    assert.equal(result.alreadyInstalled, false, 'legacy flagless install should not count as already installed')
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const allCommands = Object.values(settings.hooks)
+      .flat()
+      .flatMap(g => g.hooks)
+      .map(h => h.command)
+    // Flagless variants are gone; every event now carries an explicit --harness.
+    assert.ok(!allCommands.includes('turbocommit hook stop'), 'flagless Stop command should be replaced')
+    assert.ok(allCommands.includes('turbocommit hook stop --harness claude'))
+    assert.ok(allCommands.includes('turbocommit hook pre-tool-use --harness claude'))
+    // No duplicate turbocommit hooks left behind.
+    for (const event of Object.keys(HOOK_DEFS)) {
+      const tcCount = settings.hooks[event]
+        .flatMap(g => g.hooks)
+        .filter(h => h.command && h.command.includes('turbocommit')).length
+      assert.equal(tcCount, 1, `expected exactly 1 turbocommit hook in ${event}`)
+    }
   })
 
   it('preserves other non-turbocommit hooks', () => {
@@ -176,7 +207,7 @@ describe('installCodex', () => {
       g.hooks.some(h => h.command === 'other-tool stop')
     ))
     assert.ok(hooks.hooks.Stop.some(g =>
-      g.hooks.some(h => h.command === 'turbocommit hook stop')
+      g.hooks.some(h => h.command === 'turbocommit hook stop --harness codex')
     ))
   })
 })

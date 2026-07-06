@@ -59,6 +59,18 @@ function makeCodexTranscript (pairs) {
   return file
 }
 
+function makeClaudeTranscript (pairs) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-cli-claude-'))
+  const file = path.join(dir, 'transcript.jsonl')
+  const lines = []
+  for (const { prompt, response } of pairs) {
+    lines.push(JSON.stringify({ type: 'user', message: { content: prompt } }))
+    lines.push(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: response }] } }))
+  }
+  fs.writeFileSync(file, lines.join('\n') + '\n')
+  return file
+}
+
 function commitCount (dir) {
   return Number(execSync('git rev-list --count HEAD', { cwd: dir, encoding: 'utf8' }).trim())
 }
@@ -128,7 +140,7 @@ describe('cli', () => {
       { prompt: 'Add Codex CLI file', response: 'Created it.' }
     ])
 
-    let result = cli('hook pre-tool-use', {
+    let result = cli('hook pre-tool-use --harness codex', {
       cwd: dir,
       input: JSON.stringify({
         hook_event_name: 'PreToolUse',
@@ -141,7 +153,7 @@ describe('cli', () => {
     assert.equal(result.exitCode, 0)
     fs.writeFileSync(path.join(dir, 'codex-cli.txt'), 'content')
 
-    result = cli('hook stop', {
+    result = cli('hook stop --harness codex', {
       cwd: dir,
       input: JSON.stringify({
         hook_event_name: 'Stop',
@@ -153,6 +165,44 @@ describe('cli', () => {
     assert.equal(result.exitCode, 0)
     assert.equal(commitCount(dir), 2)
     assert.ok(lastBody(dir).includes('Response:\nCreated it.'))
+  })
+
+  it('Claude Stop payloads route to the Claude parser even with hook_event_name present', () => {
+    // Regression: current Claude Code hook payloads include hook_event_name.
+    // Without an explicit --harness flag the Stop hook must still be treated as
+    // Claude and parsed with the Claude transcript parser, not the Codex one.
+    const dir = makeRepo()
+    const transcript = makeClaudeTranscript([
+      { prompt: 'Explain the plan', response: 'Here is the real answer.' }
+    ])
+
+    let result = cli('hook pre-tool-use', {
+      cwd: dir,
+      input: JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        session_id: 'CLI-CLAUDE-1',
+        cwd: dir,
+        tool_name: 'Write',
+        tool_input: { file_path: path.join(dir, 'claude.txt') }
+      })
+    })
+    assert.equal(result.exitCode, 0)
+    fs.writeFileSync(path.join(dir, 'claude.txt'), 'content')
+
+    result = cli('hook stop', {
+      cwd: dir,
+      input: JSON.stringify({
+        hook_event_name: 'Stop',
+        session_id: 'CLI-CLAUDE-1',
+        cwd: dir,
+        transcript_path: transcript
+      })
+    })
+    assert.equal(result.exitCode, 0)
+    assert.equal(commitCount(dir), 2)
+    const body = lastBody(dir)
+    assert.ok(body.includes('Response:\nHere is the real answer.'), `expected real transcript body, got: ${body}`)
+    assert.ok(!body.includes('(no transcript)'), 'body should not be the empty-transcript fallback')
   })
 
   it('help text mentions hook command', () => {
