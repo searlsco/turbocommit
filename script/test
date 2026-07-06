@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -e
+# See script/test_fast for why: git's hook env would leak into the worktree
+# tests and corrupt this repo. test_fast unsets it in its own subprocess, but
+# the integration run below executes in THIS shell, so clear it here too.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
 trap 'rc=$?; command -v prove_it >/dev/null 2>&1 && prove_it record --name full-tests --result $rc' EXIT
 "$(dirname "$0")/test_fast"
 node --test test/integration.test.js

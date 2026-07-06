@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 set -e
+# Strip git's hook environment. When run from a git hook (e.g. the prove_it
+# pre-commit hook), git exports GIT_DIR/GIT_INDEX_FILE/etc. Our worktree tests
+# spawn `git worktree add`/`git init`, which would inherit these and operate on
+# THIS repo instead of their temp dirs — corrupting it (bare flag, stray
+# worktrees, phantom commits). Unset them so every `git` the tests run resolves
+# from its own cwd.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
 trap 'rc=$?; command -v prove_it >/dev/null 2>&1 && prove_it record --name fast-tests --result $rc' EXIT
 npx standard --fix
 node --test $(ls test/*.test.js | grep -v integration)
