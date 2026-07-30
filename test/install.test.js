@@ -180,6 +180,10 @@ describe('install', () => {
 })
 
 describe('installCodex', () => {
+  it('matches canonical Codex apply_patch calls', () => {
+    assert.ok(CODEX_HOOK_DEFS.PreToolUse.matcher.includes('apply_patch'))
+  })
+
   it('installs all Codex hook events when no hooks exist', () => {
     const file = tmpHooks({})
 

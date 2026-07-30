@@ -4,7 +4,7 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
-const { handleTrack, hasTrackedModifications, cleanupTracking, extractFilePath, trackingPath } = require('../lib/track')
+const { handleTrack, hasTrackedModifications, cleanupTracking, extractFilePath, extractFilePaths, trackingPath } = require('../lib/track')
 
 function tmpRoot () {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-track-'))
@@ -50,7 +50,7 @@ describe('handleTrack', () => {
     const entries = readTracking(root, 'sess-1')
     assert.equal(entries.length, 1)
     assert.equal(entries[0].tool, 'Write')
-    assert.equal(entries[0].file, '/tmp/a.txt')
+    assert.deepEqual(entries[0].files, ['/tmp/a.txt'])
     assert.equal(typeof entries[0].t, 'number')
   })
 
@@ -59,7 +59,7 @@ describe('handleTrack', () => {
     const entries = readTracking(root, 'sess-1')
     assert.equal(entries.length, 1)
     assert.equal(entries[0].tool, 'Edit')
-    assert.equal(entries[0].file, '/tmp/b.txt')
+    assert.deepEqual(entries[0].files, ['/tmp/b.txt'])
   })
 
   it('records MCP tool and extracts file path from tool_input', () => {
@@ -70,7 +70,7 @@ describe('handleTrack', () => {
     const entries = readTracking(root, 'sess-1')
     assert.equal(entries.length, 1)
     assert.equal(entries[0].tool, 'mcp__xcode__XcodeEdit')
-    assert.equal(entries[0].file, '/tmp/View.swift')
+    assert.deepEqual(entries[0].files, ['/tmp/View.swift'])
   })
 
   it('records Bash tool with command', () => {
@@ -92,7 +92,7 @@ describe('handleTrack', () => {
     const entries = readTracking(root, 'sess-1')
     assert.equal(entries.length, 1)
     assert.equal(entries[0].tool, 'mcp__xcode__XcodeEdit')
-    assert.equal(entries[0].file, undefined)
+    assert.equal(entries[0].files, undefined)
   })
 
   it('records MultiEdit tool (nested file paths in edits array)', () => {
@@ -144,7 +144,7 @@ describe('handleTrack', () => {
     }), root)
     const entries = readTracking(root, 'sess-1')
     assert.equal(entries.length, 1)
-    assert.equal(entries[0].file, '/tmp/nb.ipynb')
+    assert.deepEqual(entries[0].files, ['/tmp/nb.ipynb'])
   })
 })
 
@@ -257,5 +257,43 @@ describe('extractFilePath', () => {
 
   it('prefers file_path over other keys', () => {
     assert.equal(extractFilePath({ file_path: '/a', path: '/b' }), '/a')
+  })
+})
+
+describe('extractFilePaths', () => {
+  it('extracts nested Claude MultiEdit paths', () => {
+    assert.deepEqual(extractFilePaths('MultiEdit', {
+      edits: [
+        { file_path: '/repo-a/a.txt' },
+        { file_path: '/repo-b/b.txt' }
+      ]
+    }), ['/repo-a/a.txt', '/repo-b/b.txt'])
+  })
+
+  it('extracts Codex apply_patch add, update, delete, and move paths', () => {
+    const command = [
+      '*** Begin Patch',
+      '*** Add File: ../repo-b/new.txt',
+      '*** Update File: src/old.txt',
+      '*** Move to: src/new.txt',
+      '*** Delete File: gone.txt',
+      '*** End Patch'
+    ].join('\n')
+    assert.deepEqual(
+      extractFilePaths('apply_patch', { command }, '/workspace/repo-a'),
+      [
+        '/workspace/repo-b/new.txt',
+        '/workspace/repo-a/src/old.txt',
+        '/workspace/repo-a/src/new.txt',
+        '/workspace/repo-a/gone.txt'
+      ]
+    )
+  })
+
+  it('deduplicates recursively discovered MCP paths', () => {
+    assert.deepEqual(extractFilePaths('mcp__xcode__edit', {
+      filePath: '/repo/View.swift',
+      edits: [{ path: '/repo/View.swift' }, { file: '/repo/Model.swift' }]
+    }), ['/repo/View.swift', '/repo/Model.swift'])
   })
 })
