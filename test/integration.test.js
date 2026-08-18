@@ -32,7 +32,7 @@ function makeProject (opts = {}) {
   const hookLog = path.join(dir, 'hook-fired.txt')
   const diagHook = { type: 'command', command: `bash -c 'echo fired >> "${hookLog}"'` }
 
-  // Build full hook settings with all 4 turbocommit events + diagnostic hook
+  // Build full hook settings with every turbocommit event plus diagnostic hook
   const settings = opts.settings || buildSettings(diagHook)
   fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2))
 
@@ -63,7 +63,7 @@ function commitCount (dir) {
 function cleanEnv () {
   const env = {}
   for (const [k, v] of Object.entries(process.env)) {
-    if (k.startsWith('CLAUDE') || k === 'TURBOCOMMIT_DISABLED' || k === 'PROVE_IT_DISABLED') continue
+    if (k.startsWith('CLAUDE') || k === 'ANTHROPIC_API_KEY' || k === 'TURBOCOMMIT_DISABLED' || k === 'PROVE_IT_DISABLED') continue
     env[k] = v
   }
   return env

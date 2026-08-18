@@ -17,7 +17,7 @@ function tmpSettings (content) {
 }
 
 /**
- * Build settings object with all 4 turbocommit hooks installed.
+ * Build settings with every turbocommit hook installed.
  * Accepts optional overrides to modify specific events.
  */
 function fullHookSettings (overrides) {

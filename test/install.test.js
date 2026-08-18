@@ -24,7 +24,7 @@ function tmpHooks (content) {
 }
 
 describe('install', () => {
-  it('installs all 4 hook events when no hooks exist', () => {
+  it('installs every hook event when no hooks exist', () => {
     const file = tmpSettings({})
     const result = install(file)
     assert.equal(result.alreadyInstalled, false)
@@ -45,6 +45,16 @@ describe('install', () => {
     assert.ok(ptGroup.matcher, 'PreToolUse group should have a matcher')
     assert.ok(ptGroup.matcher.includes('Write'))
     assert.ok(ptGroup.matcher.includes('mcp__'))
+  })
+
+  it('installs a Bash-only PostToolUse hook', () => {
+    const file = tmpSettings({})
+    install(file)
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const group = settings.hooks.PostToolUse.find(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook post-tool-use --harness claude')
+    )
+    assert.equal(group.matcher, 'Bash')
   })
 
   it('Stop hook uses turbocommit hook stop command with explicit harness', () => {
@@ -184,6 +194,16 @@ describe('installCodex', () => {
     assert.ok(CODEX_HOOK_DEFS.PreToolUse.matcher.includes('apply_patch'))
   })
 
+  it('installs a Bash-only PostToolUse hook', () => {
+    const file = tmpHooks({})
+    installCodex(file)
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const group = hooks.hooks.PostToolUse.find(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook post-tool-use --harness codex')
+    )
+    assert.equal(group.matcher, 'Bash')
+  })
+
   it('installs all Codex hook events when no hooks exist', () => {
     const file = tmpHooks({})
 
@@ -195,6 +215,26 @@ describe('installCodex', () => {
     for (const event of Object.keys(CODEX_HOOK_DEFS)) {
       assert.ok(hasTurbocommit(hooks.hooks[event]), `expected turbocommit in ${event}`)
     }
+  })
+
+  it('upgrades an installed Codex hook whose matcher is stale', () => {
+    const file = tmpHooks({})
+    installCodex(file)
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const group = hooks.hooks.PreToolUse.find(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook pre-tool-use --harness codex')
+    )
+    group.matcher = 'Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*'
+    fs.writeFileSync(file, JSON.stringify(hooks, null, 2))
+
+    const result = installCodex(file)
+
+    assert.equal(result.alreadyInstalled, false)
+    const upgraded = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const upgradedGroup = upgraded.hooks.PreToolUse.find(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook pre-tool-use --harness codex')
+    )
+    assert.equal(upgradedGroup.matcher, CODEX_HOOK_DEFS.PreToolUse.matcher)
   })
 
   it('preserves other Codex hooks', () => {
@@ -331,7 +371,7 @@ describe('hasTurbocommit', () => {
 })
 
 describe('isFullyInstalled', () => {
-  it('returns true when all 4 hooks present', () => {
+  it('returns true when every hook is present', () => {
     const file = tmpSettings({})
     install(file)
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'))

@@ -91,7 +91,7 @@ function trackWrite (root, sessionId, filePath) {
   handleTrack(JSON.stringify({
     session_id: sessionId,
     tool_name: 'Write',
-    tool_input: { file_path: filePath || '/tmp/test.txt' }
+    tool_input: { file_path: filePath || path.join(root, 'file.txt') }
   }), root)
 }
 
@@ -109,8 +109,10 @@ function writeChain (root, sessionId, parent, ancestors) {
 
 describe('run', () => {
   let realHome
+  let realCodexHome
   before(() => {
     realHome = process.env.HOME
+    realCodexHome = process.env.CODEX_HOME
     // Clear TURBOCOMMIT_DISABLED so run() doesn't bail early.
     // Tests that exercise TURBOCOMMIT_DISABLED manage it via try/finally.
     delete process.env.TURBOCOMMIT_DISABLED
@@ -118,10 +120,13 @@ describe('run', () => {
   // Each test gets a fresh HOME so global config never leaks between tests
   beforeEach(() => {
     process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-home-'))
+    process.env.CODEX_HOME = path.join(process.env.HOME, '.codex')
     delete process.env.TURBOCOMMIT_DISABLED
   })
   after(() => {
     process.env.HOME = realHome
+    if (realCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = realCodexHome
   })
   it('does nothing when TURBOCOMMIT_DISABLED is set', () => {
     const dir = makeRepo()

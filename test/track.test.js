@@ -4,7 +4,7 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
-const { handleTrack, hasTrackedModifications, cleanupTracking, extractFilePath, extractFilePaths, trackingPath } = require('../lib/track')
+const { handleTrack, handlePostTrack, hasTrackedModifications, cleanupTracking, extractFilePath, extractFilePaths, trackingPath } = require('../lib/track')
 
 function tmpRoot () {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-track-'))
@@ -82,6 +82,125 @@ describe('handleTrack', () => {
     assert.equal(entries.length, 1)
     assert.equal(entries[0].tool, 'Bash')
     assert.equal(entries[0].command, 'npm install')
+  })
+
+  it('records only paths made dirty by a completed Bash tool', () => {
+    const existing = path.join(root, 'existing.txt')
+    fs.writeFileSync(existing, 'existing')
+    execSync('git add existing.txt && git commit -q -m fixture', { cwd: root })
+    fs.writeFileSync(existing, 'already dirty')
+
+    const input = {
+      sessionId: 'sess-1',
+      toolUseId: 'bash-1',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'generate lockfile' }
+    }
+    handleTrack(input, root)
+    const generated = path.join(root, 'package-lock.json')
+    fs.writeFileSync(generated, '{}')
+    handlePostTrack(input, root)
+
+    const entries = readTracking(root, 'sess-1')
+    assert.deepEqual(entries.at(-1).rawFiles, [path.join(fs.realpathSync(root), 'package-lock.json')])
+    assert.equal(entries.at(-1).phase, 'post')
+    assert.equal(hasTrackedModifications(root, 'sess-1'), true)
+  })
+
+  it('records a tracked file deleted by Bash', () => {
+    const deleted = path.join(root, 'deleted.txt')
+    fs.writeFileSync(deleted, 'delete me')
+    execSync('git add deleted.txt && git commit -q -m fixture', { cwd: root })
+    const input = {
+      sessionId: 'sess-1',
+      toolUseId: 'bash-delete',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'remove generated file' }
+    }
+
+    handleTrack(input, root)
+    fs.unlinkSync(deleted)
+    handlePostTrack(input, root)
+
+    assert.deepEqual(readTracking(root, 'sess-1').at(-1).rawFiles, [
+      path.join(fs.realpathSync(root), 'deleted.txt')
+    ])
+  })
+
+  it('records both sides of a tracked file renamed by Bash', () => {
+    const before = path.join(root, 'before.txt')
+    const after = path.join(root, 'after.txt')
+    fs.writeFileSync(before, 'rename me')
+    execSync('git add before.txt && git commit -q -m fixture', { cwd: root })
+    const input = {
+      sessionId: 'sess-1',
+      toolUseId: 'bash-rename',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'rename generated file' }
+    }
+
+    handleTrack(input, root)
+    fs.renameSync(before, after)
+    handlePostTrack(input, root)
+
+    assert.deepEqual(readTracking(root, 'sess-1').at(-1).rawFiles.sort(), [
+      path.join(fs.realpathSync(root), 'after.txt'),
+      path.join(fs.realpathSync(root), 'before.txt')
+    ])
+  })
+
+  it('does not attribute shell changes while another shell tool overlaps', () => {
+    const a = {
+      sessionId: 'session-a',
+      toolUseId: 'bash-a',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'generate a' }
+    }
+    const b = {
+      sessionId: 'session-b',
+      toolUseId: 'bash-b',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'generate b' }
+    }
+
+    handleTrack(a, root)
+    handleTrack(b, root)
+    fs.writeFileSync(path.join(root, 'a.txt'), 'a')
+    handlePostTrack(a, root)
+    fs.writeFileSync(path.join(root, 'b.txt'), 'b')
+    handlePostTrack(b, root)
+
+    assert.equal(hasTrackedModifications(root, 'session-a'), false)
+    assert.equal(hasTrackedModifications(root, 'session-b'), false)
+  })
+
+  it('does not attribute a path claimed by another session during Bash', () => {
+    const bash = {
+      sessionId: 'bash-session',
+      toolUseId: 'bash-1',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'generate files' }
+    }
+    const claimed = path.join(root, 'claimed.txt')
+
+    handleTrack(bash, root)
+    handleTrack({
+      sessionId: 'edit-session',
+      cwd: root,
+      toolName: 'Write',
+      toolInput: { file_path: claimed }
+    }, root)
+    fs.writeFileSync(claimed, 'claimed by edit session')
+    handlePostTrack(bash, root)
+
+    assert.equal(hasTrackedModifications(root, 'bash-session'), false)
+    assert.equal(hasTrackedModifications(root, 'edit-session'), true)
   })
 
   it('records MCP tool even without extractable file path', () => {
@@ -295,5 +414,28 @@ describe('extractFilePaths', () => {
       filePath: '/repo/View.swift',
       edits: [{ path: '/repo/View.swift' }, { file: '/repo/Model.swift' }]
     }), ['/repo/View.swift', '/repo/Model.swift'])
+  })
+
+  it('extracts alternate singular and plural MCP path fields', () => {
+    assert.deepEqual(extractFilePaths('mcp__writer__edit', {
+      relative_path: 'src/a.js',
+      file_paths: ['src/b.js', 'src/c.js'],
+      nested: { relativePath: 'src/d.js', filePaths: ['src/e.js'] }
+    }, '/repo'), [
+      '/repo/src/a.js',
+      '/repo/src/b.js',
+      '/repo/src/c.js',
+      '/repo/src/d.js',
+      '/repo/src/e.js'
+    ])
+  })
+
+  it('extracts local file URIs and ignores remote URIs', () => {
+    assert.deepEqual(extractFilePaths('mcp__writer__edit', {
+      changes: [
+        { uri: 'file:///repo/src/space%20name.js' },
+        { uri: 'https://example.com/not-a-file' }
+      ]
+    }, '/repo'), ['/repo/src/space name.js'])
   })
 })

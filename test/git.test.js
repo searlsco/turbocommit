@@ -5,7 +5,8 @@ const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
 const {
-  gitRoot, gitCommonDir, hasChanges, addAndCommit, hasCommits, currentBranch, pushClean
+  gitRoot, gitWorktrees, gitCommonDir, hasChanges, hasPathChanges, addAndCommit,
+  stagePaths, commitPaths, hasCommits, currentBranch, pushClean
 } = require('../lib/git')
 
 function makeRepo () {
@@ -64,6 +65,24 @@ describe('gitCommonDir', () => {
   })
 })
 
+describe('gitWorktrees', () => {
+  it('keeps valid worktrees when another registered worktree is stale', () => {
+    const main = makeRepoWithCommit()
+    const valid = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-git-valid-wt-'))
+    const stale = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-git-stale-wt-'))
+    fs.rmdirSync(valid)
+    fs.rmdirSync(stale)
+    execSync(`git worktree add -q -b valid "${valid}"`, { cwd: main, stdio: 'pipe' })
+    execSync(`git worktree add -q -b stale "${stale}"`, { cwd: main, stdio: 'pipe' })
+    fs.rmSync(stale, { recursive: true })
+
+    assert.deepEqual(
+      gitWorktrees(main).sort(),
+      [fs.realpathSync(main), fs.realpathSync(valid)].sort()
+    )
+  })
+})
+
 describe('hasChanges', () => {
   it('returns false for clean repo', () => {
     const dir = makeRepoWithCommit()
@@ -80,6 +99,110 @@ describe('hasChanges', () => {
     const dir = makeRepoWithCommit()
     fs.writeFileSync(path.join(dir, 'new.txt'), 'new file')
     assert.equal(hasChanges(dir), true)
+  })
+})
+
+describe('hasPathChanges', () => {
+  it('preserves the identity of a tracked symlink', () => {
+    const dir = makeRepoWithCommit()
+    const target = path.join(os.tmpdir(), `tc-symlink-target-${process.pid}-${Date.now()}`)
+    fs.writeFileSync(target, 'target')
+    const link = path.join(dir, 'link.txt')
+    fs.symlinkSync(target, link)
+
+    assert.equal(hasPathChanges(dir, link), true)
+  })
+
+  it('treats pathspec metacharacters as literal filename characters', () => {
+    for (const [ownedName, unrelatedName] of [
+      ['[ab].txt', 'a.txt'],
+      ['star*.txt', 'star-other.txt'],
+      ['question?.txt', 'question1.txt'],
+      [':leading.txt', 'other.txt']
+    ]) {
+      const dir = makeRepoWithCommit()
+      const owned = path.join(dir, ownedName)
+      const unrelated = path.join(dir, unrelatedName)
+      fs.writeFileSync(owned, 'owned')
+      fs.writeFileSync(unrelated, 'base')
+      execSync('git add -A && git commit -q -m Fixture', { cwd: dir })
+      fs.writeFileSync(unrelated, 'another session')
+
+      assert.equal(hasPathChanges(dir, owned), false, ownedName)
+    }
+  })
+})
+
+describe('path-scoped commits', () => {
+  it('commits literal metacharacter paths without matching unrelated files', () => {
+    const dir = makeRepoWithCommit()
+    const owned = path.join(dir, '[ab].txt')
+    const unrelated = path.join(dir, 'a.txt')
+    fs.writeFileSync(owned, 'base')
+    fs.writeFileSync(unrelated, 'base')
+    execSync('git add -A && git commit -q -m Fixture', { cwd: dir })
+    fs.writeFileSync(owned, 'owned session')
+    fs.writeFileSync(unrelated, 'another session')
+
+    commitPaths(dir, [owned], 'Literal path', 'body')
+
+    assert.equal(
+      execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim(),
+      '[ab].txt'
+    )
+    assert.match(execSync('git status --short -- a.txt', { cwd: dir, encoding: 'utf8' }), /^ M a\.txt/m)
+  })
+
+  it('does not stage an untracked linked worktree from a broad directory path', () => {
+    const dir = makeRepoWithCommit()
+    const worktree = path.join(dir, '.codex', 'worktrees', 'nested')
+    fs.mkdirSync(path.dirname(worktree), { recursive: true })
+    execSync(`git worktree add -q -b nested "${worktree}"`, { cwd: dir })
+
+    const staged = stagePaths(dir, [path.join(dir, '.codex')])
+
+    assert.deepEqual(staged, [])
+    assert.equal(
+      execSync('git ls-files --stage -- .codex', { cwd: dir, encoding: 'utf8' }).trim(),
+      ''
+    )
+  })
+
+  it('drops stale untracked paths while committing other owned paths', () => {
+    const dir = makeRepoWithCommit()
+    const live = path.join(dir, 'live.txt')
+    fs.writeFileSync(live, 'live')
+
+    commitPaths(dir, [path.join(dir, 'gone.txt'), live], 'Live path', 'body')
+
+    assert.equal(
+      execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim(),
+      'live.txt'
+    )
+  })
+
+  it('completes a merge with the whole index when partial commits are forbidden', () => {
+    const dir = makeRepoWithCommit()
+    const initialBranch = currentBranch(dir)
+    const file = path.join(dir, 'conflict.txt')
+    fs.writeFileSync(file, 'base\n')
+    execSync('git add conflict.txt && git commit -q -m Fixture', { cwd: dir })
+    execSync('git checkout -q -b topic', { cwd: dir })
+    fs.writeFileSync(file, 'topic\n')
+    execSync('git commit -qam Topic', { cwd: dir })
+    execSync(`git checkout -q ${initialBranch}`, { cwd: dir })
+    fs.writeFileSync(file, 'main\n')
+    execSync('git commit -qam Main', { cwd: dir })
+    assert.throws(() => execSync('git merge topic', { cwd: dir, stdio: 'pipe' }))
+    fs.writeFileSync(file, 'resolved\n')
+
+    commitPaths(dir, [file], 'Resolve merge', 'body')
+
+    const parents = execSync('git rev-list --parents -n 1 HEAD', {
+      cwd: dir,
+      encoding: 'utf8'
+    }).trim().split(' ')
+    assert.equal(parents.length, 3)
   })
 })
 

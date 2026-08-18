@@ -4,7 +4,7 @@ const { readStdin } = require('./lib/io')
 const { install, uninstall } = require('./lib/install')
 const { init, deinit } = require('./lib/init')
 const { run, runPreCompact } = require('./lib/run')
-const { handleTrack } = require('./lib/track')
+const { handleTrack, handlePostTrack } = require('./lib/track')
 const { handleSessionStart, handleSessionEnd } = require('./lib/session')
 const { doctor } = require('./lib/doctor')
 const { monitor } = require('./lib/monitor')
@@ -174,6 +174,9 @@ function cmdHook (argv, harness) {
     switch (event) {
       case 'pre-tool-use':
         handleTrack(hookInput, root)
+        return
+      case 'post-tool-use':
+        handlePostTrack(hookInput, root)
         return
       case 'session-start':
         handleSessionStart(hookInput, root)
