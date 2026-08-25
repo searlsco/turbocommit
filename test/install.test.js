@@ -57,6 +57,27 @@ describe('install', () => {
     assert.equal(group.matcher, 'Bash')
   })
 
+  it('installs a Bash-only PostToolUseFailure hook', () => {
+    const file = tmpSettings({})
+    install(file)
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const group = settings.hooks.PostToolUseFailure.find(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook post-tool-use --harness claude')
+    )
+    assert.equal(group.matcher, 'Bash')
+  })
+
+  it('gives Claude SessionEnd the maximum supported timeout', () => {
+    const file = tmpSettings({})
+    install(file)
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const hook = settings.hooks.SessionEnd
+      .flatMap(group => group.hooks)
+      .find(hook => hook.command === 'turbocommit hook session-end --harness claude')
+
+    assert.equal(hook.timeout, 60)
+  })
+
   it('Stop hook uses turbocommit hook stop command with explicit harness', () => {
     const file = tmpSettings({})
     install(file)
@@ -106,6 +127,20 @@ describe('install', () => {
     install(file)
     const result = install(file)
     assert.equal(result.alreadyInstalled, true)
+  })
+
+  it('upgrades a SessionEnd hook installed without its timeout', () => {
+    const file = tmpSettings({})
+    install(file)
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
+    delete settings.hooks.SessionEnd[0].hooks[0].timeout
+    fs.writeFileSync(file, JSON.stringify(settings, null, 2))
+
+    const result = install(file)
+
+    assert.equal(result.alreadyInstalled, false)
+    const upgraded = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(upgraded.hooks.SessionEnd[0].hooks[0].timeout, 60)
   })
 
   it('is idempotent — no duplicates on re-install', () => {
@@ -215,6 +250,31 @@ describe('installCodex', () => {
     for (const event of Object.keys(CODEX_HOOK_DEFS)) {
       assert.ok(hasTurbocommit(hooks.hooks[event]), `expected turbocommit in ${event}`)
     }
+  })
+
+  it('installs Codex SessionEnd cleanup', () => {
+    const file = tmpHooks({})
+    installCodex(file)
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const group = hooks.hooks.SessionEnd.find(g =>
+      g.hooks.some(h => h.command === 'turbocommit hook session-end --harness codex')
+    )
+    assert.ok(group)
+    assert.equal(group.hooks[0].timeout, 3)
+  })
+
+  it('upgrades a Codex SessionEnd hook installed without its timeout', () => {
+    const file = tmpHooks({})
+    installCodex(file)
+    const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
+    delete hooks.hooks.SessionEnd[0].hooks[0].timeout
+    fs.writeFileSync(file, JSON.stringify(hooks, null, 2))
+
+    const result = installCodex(file)
+
+    assert.equal(result.alreadyInstalled, false)
+    const upgraded = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(upgraded.hooks.SessionEnd[0].hooks[0].timeout, 3)
   })
 
   it('upgrades an installed Codex hook whose matcher is stale', () => {

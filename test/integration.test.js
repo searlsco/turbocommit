@@ -73,7 +73,7 @@ function runClaude (dir, prompt, { retries = 0, check } = {}) {
   // Clean env: strip all CLAUDE* and turbocommit/prove_it vars to prevent
   // the outer session from interfering with the inner claude -p
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const r = spawnSync('claude -p --model haiku', {
+    const r = spawnSync('claude -p --model haiku --permission-mode acceptEdits', {
       cwd: dir,
       shell: true,
       encoding: 'utf8',

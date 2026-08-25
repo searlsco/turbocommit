@@ -1,15 +1,32 @@
 #!/usr/bin/env node
 
-const { readStdin } = require('./lib/io')
+const { spawn } = require('child_process')
+const crypto = require('crypto')
+const fs = require('fs')
+const path = require('path')
+const { readStdin, ensureDir } = require('./lib/io')
 const { install, uninstall } = require('./lib/install')
 const { init, deinit } = require('./lib/init')
-const { run, runPreCompact } = require('./lib/run')
-const { handleTrack, handlePostTrack } = require('./lib/track')
-const { handleSessionStart, handleSessionEnd } = require('./lib/session')
+const { run, runPreCompact, recoverBashOverlaps } = require('./lib/run')
+const { handleTrack, handlePostTrack, finalizeBashSnapshots, recordBashSessionStop, readTracking } = require('./lib/track')
+const { handleSessionStart, handleSessionEnd, turbocommitDir } = require('./lib/session')
 const { doctor } = require('./lib/doctor')
 const { monitor } = require('./lib/monitor')
-const { gitRoot } = require('./lib/git')
+const { gitRoot, pushClean } = require('./lib/git')
+const { activeConfig } = require('./lib/config')
+const { logEvent } = require('./lib/log')
 const { parseHarnessArg, normalizeHookInput } = require('./lib/harness')
+const {
+  createSessionEndRescue,
+  restoreSessionEndRescue,
+  matchesSessionEndRescueRoot,
+  finalizeRestoredSessionEndRescue,
+  preserveSessionEndRecoveredCommit,
+  recordPreservedSessionEndRescue,
+  removeSessionEndRescueWorktree,
+  cleanupSessionEndRescue,
+  isClean
+} = require('./lib/rescue')
 
 const VERSION = require('./package.json').version
 
@@ -59,6 +76,10 @@ function main (argv) {
       return cmdDeinit()
     case 'hook':
       return cmdHook(parsed.args.slice(1), parsed.harness)
+    case 'session-end-worker':
+      return cmdSessionEndWorker(parsed.args.slice(1), parsed.harness)
+    case 'session-end-rescue-worker':
+      return cmdSessionEndRescueWorker(parsed.args.slice(1))
     case 'run':
       return cmdRunDeprecated()
     case '--version':
@@ -165,6 +186,7 @@ function cmdMonitor (harness) {
 }
 
 function cmdHook (argv, harness) {
+  if (process.env.TURBOCOMMIT_DISABLED) return
   const event = argv[0]
   try {
     const input = readStdin()
@@ -173,7 +195,11 @@ function cmdHook (argv, harness) {
     const root = gitRoot(hookInput.cwd || process.cwd())
     switch (event) {
       case 'pre-tool-use':
-        handleTrack(hookInput, root)
+        try {
+          if (handleTrack(hookInput, root) === false) denyPreToolUse()
+        } catch {
+          denyPreToolUse()
+        }
         return
       case 'post-tool-use':
         handlePostTrack(hookInput, root)
@@ -183,6 +209,13 @@ function cmdHook (argv, harness) {
         return
       case 'session-end':
         handleSessionEnd(hookInput, root)
+        if (hookInput.harness === 'claude') {
+          let completed = false
+          try { completed = completeSessionEnd(hookInput, root, 45000) } catch {}
+          if (!completed) rescueClaudeSessionEnd(hookInput, root)
+        } else {
+          spawnSessionEndWorker(hookInput, root, harness)
+        }
         return
       case 'pre-compact':
         runPreCompact(hookInput)
@@ -197,6 +230,214 @@ function cmdHook (argv, harness) {
   } catch {
     // Never fail: fire and forget
   }
+}
+
+function spawnSessionEndWorker (hookInput, root, harness) {
+  if (process.env.TURBOCOMMIT_DISABLED || !root || !hookInput.sessionId) return
+  const transcript = copySessionEndTranscript(root, hookInput.transcriptPath)
+  const payload = Buffer.from(JSON.stringify({
+    sessionId: hookInput.sessionId,
+    event: 'SessionEnd',
+    cwd: root,
+    harness: hookInput.harness || harness,
+    transcriptPath: transcript.path,
+    temporaryTranscript: transcript.temporary,
+    model: hookInput.model
+  })).toString('base64url')
+  const args = [__filename, 'session-end-worker', payload]
+  if (harness) args.push('--harness', harness)
+  const child = spawn(process.execPath, args, {
+    cwd: stableWorkerCwd(root),
+    detached: true,
+    stdio: 'ignore'
+  })
+  child.on('error', () => {
+    if (transcript.temporary) cleanupSessionEndTranscript(root, transcript.path)
+  })
+  child.unref()
+}
+
+function cmdSessionEndWorker (argv, harness) {
+  if (process.env.TURBOCOMMIT_DISABLED) return
+  let hookInput
+  try {
+    hookInput = JSON.parse(Buffer.from(argv[0], 'base64url').toString('utf8'))
+  } catch {
+    return
+  }
+  hookInput.harness = hookInput.harness || harness
+  const root = gitRoot(hookInput.cwd || process.cwd())
+  try {
+    if (!root || !hookInput.sessionId) return
+    completeSessionEnd(hookInput, root, Infinity)
+  } finally {
+    if (hookInput.temporaryTranscript) cleanupTemporarySessionEndTranscript(root, hookInput.transcriptPath)
+  }
+}
+
+function completeSessionEnd (hookInput, root, waitMs, { deferPush = false } = {}) {
+  if (!root || !hookInput.sessionId) return false
+  const deadline = waitMs === Infinity ? Infinity : Date.now() + waitMs
+  const remainingWait = () => deadline === Infinity ? Infinity : Math.max(0, deadline - Date.now())
+  const finalized = finalizeBashSnapshots(root, hookInput.sessionId, Date.now(), remainingWait())
+  if (finalized == null) return false
+  if (readTracking(root, hookInput.sessionId).length > 0) {
+    run(hookInput, { recoveryDeadline: deadline, operationDeadline: deadline, deferPush })
+    return readTracking(root, hookInput.sessionId).length === 0
+  }
+  recordBashSessionStop(root, hookInput.sessionId)
+  const recoveryConfig = deferPush ? { ...activeConfig(root).config, push: false } : undefined
+  recoverBashOverlaps(root, hookInput, recoveryConfig, remainingWait())
+  return true
+}
+
+function rescueClaudeSessionEnd (hookInput, root) {
+  if (!root || !hookInput.sessionId) return
+  const transcript = copySessionEndTranscript(root, hookInput.transcriptPath)
+  const rescueInput = {
+    ...hookInput,
+    transcriptPath: transcript.path,
+    temporaryTranscript: transcript.temporary
+  }
+  const rescue = createSessionEndRescue(root, rescueInput)
+  if (!rescue) {
+    if (transcript.temporary) cleanupTemporarySessionEndTranscript(root, transcript.path)
+    return
+  }
+  spawnSessionEndRescueWorker(rescue)
+}
+
+function spawnSessionEndRescueWorker (rescue) {
+  const payload = Buffer.from(JSON.stringify(rescue)).toString('base64url')
+  const child = spawn(process.execPath, [__filename, 'session-end-rescue-worker', payload], {
+    cwd: stableWorkerCwd(rescue.root),
+    detached: true,
+    stdio: 'ignore'
+  })
+  child.on('error', () => {})
+  child.unref()
+}
+
+function cmdSessionEndRescueWorker (argv) {
+  let rescue
+  try {
+    rescue = JSON.parse(Buffer.from(argv[0], 'base64url').toString('utf8'))
+  } catch {
+    return
+  }
+  let recreated = false
+  let completed = false
+  try {
+    const existingRoot = gitRoot(rescue.root)
+    if (existingRoot) {
+      if (!matchesSessionEndRescueRoot(rescue, existingRoot)) return
+      try { completed = completeSessionEnd(rescue.hookInput, existingRoot, Infinity) } catch {}
+    }
+    if (!completed && !fs.existsSync(rescue.root)) {
+      recreated = restoreRescueWithRetry(rescue)
+      if (recreated) {
+        try { completed = completeSessionEnd(rescue.hookInput, rescue.root, Infinity, { deferPush: true }) } catch {}
+      }
+    }
+    if (!completed) return
+    const clean = isClean(rescue.root)
+    if (!recreated) {
+      const recovered = preserveSessionEndRecoveredCommit(rescue, rescue.root)
+      if (!recovered) return
+      if (clean) {
+        cleanupSessionEndRescue(rescue)
+      } else {
+        recordPreservedSessionEndRescue(rescue, recovered, 'dirty-existing-worktree')
+      }
+    } else {
+      const finalized = finalizeRestoredSessionEndRescue(rescue, { clean })
+      if (finalized.resolved) {
+        pushRestoredSessionEndRescue(rescue, finalized)
+        if (isClean(rescue.root)) {
+          cleanupSessionEndRescue(rescue, { removeWorktree: true })
+        } else {
+          recordPreservedSessionEndRescue(rescue, finalized, 'dirty-attached-worktree')
+        }
+      } else if (finalized.preserved && finalized.removeWorktree) {
+        removeSessionEndRescueWorktree(rescue)
+      }
+    }
+    if (rescue.hookInput?.temporaryTranscript) {
+      cleanupTemporarySessionEndTranscript(rescue.root, rescue.hookInput.transcriptPath)
+    }
+  } catch {
+    // The rescue ref and record remain available for a later retry.
+  }
+}
+
+function pushRestoredSessionEndRescue (rescue, finalized) {
+  const config = activeConfig(rescue.root).config
+  if (config.push !== true) return
+  const pushed = finalized.attached && pushClean(rescue.root)
+  logEvent(pushed ? 'push' : 'push-fail', {
+    harness: rescue.hookInput?.harness,
+    project: path.basename(rescue.root),
+    branch: rescue.branch
+  })
+}
+
+function restoreRescueWithRetry (rescue) {
+  const deadline = Date.now() + 30000
+  const sleeper = new Int32Array(new SharedArrayBuffer(4))
+  while (!fs.existsSync(rescue.root)) {
+    if (restoreSessionEndRescue(rescue)) return true
+    if (Date.now() >= deadline) return false
+    Atomics.wait(sleeper, 0, 0, 100)
+  }
+  return false
+}
+
+function stableWorkerCwd (root) {
+  const base = turbocommitDir(root)
+  return base ? path.dirname(base) : root
+}
+
+function copySessionEndTranscript (root, source) {
+  if (!source) return { path: source, temporary: false }
+  const base = turbocommitDir(root)
+  if (!base) return { path: source, temporary: false }
+  const dir = path.join(base, 'session-end-transcripts')
+  const destination = path.join(dir, `${process.pid}-${crypto.randomUUID()}.jsonl`)
+  try {
+    ensureDir(dir)
+    fs.copyFileSync(source, destination)
+    return { path: destination, temporary: true }
+  } catch {
+    return { path: source, temporary: false }
+  }
+}
+
+function cleanupSessionEndTranscript (root, transcriptPath) {
+  const base = turbocommitDir(root)
+  if (!base || !transcriptPath) return false
+  const dir = path.join(base, 'session-end-transcripts')
+  if (path.dirname(path.resolve(transcriptPath)) !== path.resolve(dir)) return false
+  try { fs.unlinkSync(transcriptPath) } catch {}
+  return !fs.existsSync(transcriptPath)
+}
+
+function cleanupTemporarySessionEndTranscript (root, transcriptPath) {
+  if (root && cleanupSessionEndTranscript(root, transcriptPath)) return
+  if (!transcriptPath) return
+  const resolved = path.resolve(transcriptPath)
+  if (path.basename(path.dirname(resolved)) !== 'session-end-transcripts') return
+  if (!/^\d+-[0-9a-f-]{36}\.jsonl$/i.test(path.basename(resolved))) return
+  try { fs.unlinkSync(resolved) } catch {}
+}
+
+function denyPreToolUse () {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: 'turbocommit could not safely persist path ownership; retry the tool'
+    }
+  }) + '\n')
 }
 
 function cmdRunDeprecated () {

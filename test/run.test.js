@@ -4,8 +4,18 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const { execSync } = require('child_process')
-const { run, runPreCompact, formatModelName, resolveCoauthor, readClaudeAttribution } = require('../lib/run')
-const { handleTrack } = require('../lib/track')
+const { run, runPreCompact, recoverBashOverlaps, formatModelName, resolveCoauthor, readClaudeAttribution } = require('../lib/run')
+const {
+  handleTrack,
+  handlePostTrack,
+  acquireBashOverlapRecoveryLock,
+  hasActiveBashSnapshot,
+  readTracking,
+  recordBashSessionStop,
+  readReadyBashOverlaps,
+  cleanupTracking,
+  trackingPath
+} = require('../lib/track')
 const { handleSessionStart, savePending, chainDir, saveWatermark, readWatermark } = require('../lib/session')
 const { ensureDir } = require('../lib/io')
 
@@ -14,6 +24,13 @@ function makeRepo () {
   execSync('git init', { cwd: dir, stdio: 'pipe' })
   execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' })
   execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' })
+  return dir
+}
+
+function makeWorktree (main, branch) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-run-worktree-'))
+  fs.rmdirSync(dir)
+  execSync(`git worktree add -q -b ${branch} "${dir}"`, { cwd: main, stdio: 'pipe' })
   return dir
 }
 
@@ -141,6 +158,69 @@ describe('run', () => {
     } finally {
       delete process.env.TURBOCOMMIT_DISABLED
     }
+  })
+
+  it('preserves Bash ownership when finalization misses its recovery deadline', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const sessionId = 'MISSED-FINALIZATION-DEADLINE'
+    handleTrack({
+      sessionId,
+      toolUseId: 'unfinished-bash',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate file' }
+    }, dir)
+    fs.writeFileSync(path.join(dir, 'generated.txt'), 'content')
+    const release = acquireBashOverlapRecoveryLock(dir)
+    assert.ok(release)
+    try {
+      run({
+        event: 'SessionEnd',
+        harness: 'claude',
+        sessionId,
+        cwd: dir,
+        transcriptPath: makeTranscript([{ prompt: 'Generate file', response: 'Done.' }])
+      }, { recoveryDeadline: Date.now(), operationDeadline: Date.now() })
+    } finally {
+      release()
+    }
+
+    assert.equal(commitCount(dir), 1)
+    assert.ok(readTracking(dir, sessionId).length > 0)
+    assert.equal(hasActiveBashSnapshot(dir), true)
+    assert.equal(execSync('git status --short -- generated.txt', { cwd: dir, encoding: 'utf8' }).trim(), '?? generated.txt')
+  })
+
+  it('falls back to transcript metadata before an operation deadline', () => {
+    const dir = makeRepo()
+    const claudeDir = path.join(dir, '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    fs.writeFileSync(path.join(claudeDir, 'turbocommit.json'), JSON.stringify({
+      enabled: true,
+      title: { type: 'agent', command: 'sleep 2; echo "Late title"' },
+      body: { type: 'agent', command: 'sleep 2; echo "Late body"' }
+    }))
+    fs.writeFileSync(path.join(dir, 'README.md'), 'init')
+    execSync('git add -A && git commit -m "Initial"', { cwd: dir, stdio: 'pipe' })
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'content')
+    trackWrite(dir, 'DEADLINE', path.join(dir, 'file.txt'))
+    const transcript = makeTranscript([{ prompt: 'Fallback headline', response: 'Fallback response.' }])
+    const startedAt = Date.now()
+
+    withCwd(dir, () => {
+      run({
+        event: 'SessionEnd',
+        harness: 'claude',
+        sessionId: 'DEADLINE',
+        cwd: dir,
+        transcriptPath: transcript
+      }, { operationDeadline: startedAt + 100 })
+    })
+
+    assert.ok(Date.now() - startedAt < 2000)
+    assert.equal(lastSubject(dir), 'Fallback headline')
+    assert.ok(lastBody(dir).includes('Fallback response.'))
   })
 
   it('disables when TURBOCOMMIT_DISABLED is "0" (truthy string)', () => {
@@ -444,6 +524,288 @@ describe('run', () => {
     // Transcript buffered to pending
     const pendDir = path.join(dir, '.git', 'turbocommit', 'pending', 'S1')
     assert.ok(fs.existsSync(pendDir))
+    assert.ok(!fs.existsSync(trackingPath(dir, 'S1')))
+  })
+
+  it('commits shell changes whose post hook never arrived', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const input = {
+      sessionId: 'ABANDONED-BASH',
+      toolUseId: 'bash-abandoned',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate file before interruption' }
+    }
+    handleTrack(input, dir)
+    fs.writeFileSync(path.join(dir, 'generated.txt'), 'generated')
+    const transcript = makeTranscript([{ prompt: 'Generate a file', response: 'Done.' }])
+
+    withCwd(dir, () => {
+      run({
+        harness: 'claude',
+        event: 'Stop',
+        sessionId: 'ABANDONED-BASH',
+        transcriptPath: transcript,
+        cwd: dir
+      })
+    })
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(
+      execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim(),
+      'generated.txt'
+    )
+  })
+
+  it('recovers unchanged paths after every overlapping shell owner stops', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const a = {
+      sessionId: 'OVERLAP-A',
+      toolUseId: 'bash-a',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate a' }
+    }
+    const b = {
+      sessionId: 'OVERLAP-B',
+      toolUseId: 'bash-b',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate b' }
+    }
+    handleTrack(a, dir)
+    handleTrack(b, dir)
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a')
+    handlePostTrack(a, dir)
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b')
+    handlePostTrack(b, dir)
+    fs.writeFileSync(path.join(dir, 'unrelated.txt'), 'unrelated')
+
+    const transcriptA = makeTranscript([{ prompt: 'Generate A', response: 'Done.' }])
+    const transcriptB = makeTranscript([{ prompt: 'Generate B', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'OVERLAP-A', transcriptPath: transcriptA, cwd: dir })
+    assert.equal(commitCount(dir), 1)
+
+    run({ harness: 'claude', event: 'Stop', sessionId: 'OVERLAP-B', transcriptPath: transcriptB, cwd: dir })
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(lastSubject(dir), 'Recover overlapping shell changes')
+    assert.deepEqual(
+      execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim().split('\n'),
+      ['a.txt', 'b.txt']
+    )
+    assert.equal(
+      execSync('git status --short -- unrelated.txt', { cwd: dir, encoding: 'utf8' }).trim(),
+      '?? unrelated.txt'
+    )
+  })
+
+  it('does not recover an overlapping path whose content changed later', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const a = {
+      sessionId: 'CHANGED-A',
+      toolUseId: 'bash-a',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate a' }
+    }
+    const b = {
+      sessionId: 'CHANGED-B',
+      toolUseId: 'bash-b',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate b' }
+    }
+    handleTrack(a, dir)
+    handleTrack(b, dir)
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a')
+    handlePostTrack(a, dir)
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b')
+    handlePostTrack(b, dir)
+
+    const transcriptA = makeTranscript([{ prompt: 'Generate A', response: 'Done.' }])
+    const transcriptB = makeTranscript([{ prompt: 'Generate B', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'CHANGED-A', transcriptPath: transcriptA, cwd: dir })
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'changed after overlap')
+    run({ harness: 'claude', event: 'Stop', sessionId: 'CHANGED-B', transcriptPath: transcriptB, cwd: dir })
+
+    assert.equal(commitCount(dir), 1)
+    assert.deepEqual(
+      execSync('git status --short', { cwd: dir, encoding: 'utf8' }).trim().split('\n').sort(),
+      ['?? a.txt', '?? b.txt']
+    )
+    const monitor = path.join(process.env.HOME, '.claude', 'turbocommit', 'monitor.jsonl')
+    const events = fs.readFileSync(monitor, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    assert.ok(events.some(event => event.reason === 'bash-overlap-changed'))
+
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b')
+    const laterTranscript = makeTranscript([{ prompt: 'Read the repository', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'LATER', transcriptPath: laterTranscript, cwd: dir })
+
+    assert.equal(commitCount(dir), 1)
+    assert.deepEqual(
+      execSync('git status --short', { cwd: dir, encoding: 'utf8' }).trim().split('\n').sort(),
+      ['?? a.txt', '?? b.txt']
+    )
+  })
+
+  it('does not recover while another shell snapshot is active', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const shell = sessionId => ({
+      sessionId,
+      toolUseId: `bash-${sessionId}`,
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: `generate ${sessionId}` }
+    })
+    const a = shell('ACTIVE-A')
+    const b = shell('ACTIVE-B')
+    const c = shell('ACTIVE-C')
+    handleTrack(a, dir)
+    handleTrack(b, dir)
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a')
+    handlePostTrack(a, dir)
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b')
+    handlePostTrack(b, dir)
+    const completedAt = Date.now()
+    const sleeper = new Int32Array(new SharedArrayBuffer(4))
+    while (Date.now() <= completedAt) Atomics.wait(sleeper, 0, 0, 1)
+    handleTrack(c, dir)
+
+    const transcriptA = makeTranscript([{ prompt: 'Generate A', response: 'Done.' }])
+    const transcriptB = makeTranscript([{ prompt: 'Generate B', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'ACTIVE-A', transcriptPath: transcriptA, cwd: dir })
+    run({ harness: 'claude', event: 'Stop', sessionId: 'ACTIVE-B', transcriptPath: transcriptB, cwd: dir })
+    assert.equal(commitCount(dir), 1)
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'changed by active C')
+    handlePostTrack(c, dir)
+    const transcriptC = makeTranscript([{ prompt: 'Generate C', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'ACTIVE-C', transcriptPath: transcriptC, cwd: dir })
+
+    assert.equal(commitCount(dir), 1)
+    assert.deepEqual(
+      execSync('git status --short', { cwd: dir, encoding: 'utf8' }).trim().split('\n').sort(),
+      ['?? a.txt', '?? b.txt']
+    )
+  })
+
+  it('recovers overlap evidence only from its linked worktree', () => {
+    const main = makeRepo()
+    enableAndCommit(main)
+    const worktree = makeWorktree(main, 'recovery-worktree')
+    const a = {
+      sessionId: 'WORKTREE-A',
+      toolUseId: 'bash-a',
+      cwd: worktree,
+      toolName: 'Bash',
+      toolInput: { command: 'generate a' }
+    }
+    const b = {
+      sessionId: 'WORKTREE-B',
+      toolUseId: 'bash-b',
+      cwd: worktree,
+      toolName: 'Bash',
+      toolInput: { command: 'generate b' }
+    }
+    handleTrack(a, worktree)
+    handleTrack(b, worktree)
+    fs.writeFileSync(path.join(worktree, 'a.txt'), 'a')
+    handlePostTrack(a, worktree)
+    fs.writeFileSync(path.join(worktree, 'b.txt'), 'b')
+    handlePostTrack(b, worktree)
+    recordBashSessionStop(worktree, 'WORKTREE-A')
+    recordBashSessionStop(worktree, 'WORKTREE-B')
+    cleanupTracking(worktree, 'WORKTREE-A')
+    cleanupTracking(worktree, 'WORKTREE-B')
+
+    recoverBashOverlaps(main, { harness: 'claude' })
+    assert.equal(commitCount(worktree), 1)
+    assert.equal(readReadyBashOverlaps(worktree).length, 1)
+
+    recoverBashOverlaps(worktree, { harness: 'claude' })
+    assert.equal(commitCount(worktree), 2)
+    assert.deepEqual(
+      execSync('git show --format= --name-only HEAD', { cwd: worktree, encoding: 'utf8' }).trim().split('\n'),
+      ['a.txt', 'b.txt']
+    )
+  })
+
+  it('defers overlap recovery during an active merge', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const baseBranch = execSync('git branch --show-current', { cwd: dir, encoding: 'utf8' }).trim()
+    execSync('git switch -q -c recovery-feature', { cwd: dir })
+    fs.writeFileSync(path.join(dir, 'merged.txt'), 'feature')
+    execSync('git add -A && git commit -q -m Feature', { cwd: dir })
+    execSync(`git switch -q ${baseBranch}`, { cwd: dir })
+    fs.writeFileSync(path.join(dir, 'base.txt'), 'base')
+    execSync('git add -A && git commit -q -m Base', { cwd: dir })
+    execSync('git merge --no-commit recovery-feature', { cwd: dir, stdio: 'pipe' })
+    const before = commitCount(dir)
+
+    const a = {
+      sessionId: 'MERGE-A',
+      toolUseId: 'bash-a',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate overlap' }
+    }
+    const b = { ...a, sessionId: 'MERGE-B', toolUseId: 'bash-b' }
+    handleTrack(a, dir)
+    handleTrack(b, dir)
+    fs.writeFileSync(path.join(dir, 'overlap.txt'), 'overlap')
+    handlePostTrack(a, dir)
+    handlePostTrack(b, dir)
+    recordBashSessionStop(dir, 'MERGE-A')
+    recordBashSessionStop(dir, 'MERGE-B')
+    cleanupTracking(dir, 'MERGE-A')
+    cleanupTracking(dir, 'MERGE-B')
+
+    recoverBashOverlaps(dir, { harness: 'claude' })
+    assert.equal(commitCount(dir), before)
+    assert.ok(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD')))
+
+    execSync('git merge --abort', { cwd: dir })
+    recoverBashOverlaps(dir, { harness: 'claude' })
+    assert.equal(commitCount(dir), before + 1)
+    assert.equal(lastSubject(dir), 'Recover overlapping shell changes')
+  })
+
+  it('does not recover overlaps when TURBOCOMMIT_DISABLED is set', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const a = {
+      sessionId: 'DISABLED-A',
+      toolUseId: 'bash-a',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate overlap' }
+    }
+    const b = { ...a, sessionId: 'DISABLED-B', toolUseId: 'bash-b' }
+    handleTrack(a, dir)
+    handleTrack(b, dir)
+    fs.writeFileSync(path.join(dir, 'overlap.txt'), 'overlap')
+    handlePostTrack(a, dir)
+    handlePostTrack(b, dir)
+    recordBashSessionStop(dir, 'DISABLED-A')
+    recordBashSessionStop(dir, 'DISABLED-B')
+    cleanupTracking(dir, 'DISABLED-A')
+    cleanupTracking(dir, 'DISABLED-B')
+
+    process.env.TURBOCOMMIT_DISABLED = '1'
+    try {
+      recoverBashOverlaps(dir, { harness: 'claude' })
+    } finally {
+      delete process.env.TURBOCOMMIT_DISABLED
+    }
+
+    assert.equal(commitCount(dir), 1)
+    assert.equal(execSync('git status --short', { cwd: dir, encoding: 'utf8' }).trim(), '?? overlap.txt')
   })
 
   it('does not include Bash-only session in Planning of future commit', () => {

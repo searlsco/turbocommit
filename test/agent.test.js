@@ -79,12 +79,20 @@ describe('runAgent', () => {
   })
 
   it('returns null when command times out', () => {
-    // runAgent hardcodes 45s timeout; we can't wait that long in tests.
+    // runAgent defaults to a 45s timeout; we can't wait that long in tests.
     // Instead, verify the tryRun timeout plumbing works end-to-end.
     const { tryRun } = require('../lib/io')
     const r = tryRun('sleep 10', { timeout: 100 })
     assert.notEqual(r.code, 0)
     assert.equal(r.signal, 'SIGTERM')
+  })
+
+  it('caps command time to an absolute lifecycle deadline', () => {
+    const startedAt = Date.now()
+    const result = runAgent('/tmp', 'sleep 10', 'ignored', { deadline: startedAt + 100 })
+
+    assert.equal(result, null)
+    assert.ok(Date.now() - startedAt < 2000)
   })
 })
 

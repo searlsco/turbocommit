@@ -20,6 +20,7 @@ const {
   chainDir,
   pendingDir,
   watermarkDir,
+  turbocommitDir,
   BREADCRUMB_THRESHOLD_MS
 } = require('../lib/session')
 
@@ -367,6 +368,32 @@ describe('cleanupStale', () => {
     fs.mkdirSync(wDir, { recursive: true })
     const file = path.join(wDir, 'old-session.json')
     fs.writeFileSync(file, JSON.stringify({ pairs: 5, commit: 'abc123' }))
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    fs.utimesSync(file, twoDaysAgo, twoDaysAgo)
+
+    cleanupStale(root)
+
+    assert.ok(!fs.existsSync(file))
+  })
+
+  it('preserves stale tracking that may describe modifications', () => {
+    const dir = path.join(turbocommitDir(root), 'tracking')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'modified.jsonl')
+    fs.writeFileSync(file, JSON.stringify({ tool: 'Write', files: ['/tmp/owned.txt'] }) + '\n')
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    fs.utimesSync(file, twoDaysAgo, twoDaysAgo)
+
+    cleanupStale(root)
+
+    assert.ok(fs.existsSync(file))
+  })
+
+  it('removes stale read-only Bash tracking', () => {
+    const dir = path.join(turbocommitDir(root), 'tracking')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'read-only.jsonl')
+    fs.writeFileSync(file, JSON.stringify({ tool: 'Bash', command: 'git status' }) + '\n')
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
     fs.utimesSync(file, twoDaysAgo, twoDaysAgo)
 

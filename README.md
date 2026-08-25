@@ -18,16 +18,33 @@ sessions concurrently and detangle which agent committed what after the fact.
 
 turbocommit registers hooks with the harnesses you use:
 
-- Claude Code: **PreToolUse**, **PostToolUse**, **SessionStart**,
-  **SessionEnd**, and **Stop**.
-- Codex: **PreToolUse**, **PostToolUse**, **SessionStart**, **PreCompact**,
-  and **Stop**.
+- Claude Code: **PreToolUse**, **PostToolUse**, **PostToolUseFailure**,
+  **SessionStart**, **SessionEnd**, and **Stop**.
+- Codex: **PreToolUse**, **PostToolUse**, **SessionStart**, **SessionEnd**,
+  **PreCompact**, and **Stop**.
 
-- **PreToolUse** tracks the paths supplied to editing tools and snapshots the
-  repository before shell commands.
+- **PreToolUse** tentatively claims the paths supplied to editing tools while
+  recovery finishes, promotes the claim only when the tool may proceed, and
+  snapshots the repository before shell commands.
 - **PostToolUse** attributes paths that became dirty during a shell command.
-  Commands that overlap another shell command fail closed and claim nothing.
-  Read-only commands remain uncommitted.
+  Concurrent commands in one session share ownership. Commands from different
+  sessions retain hashed overlap evidence instead of claiming each other's
+  paths. Once every involved turn stops and no shell remains active in that
+  checkout, unchanged and otherwise-unclaimed paths are committed separately
+  as recovered shell changes. Evidence is scoped to its exact worktree and is
+  permanently discarded if file contents or executable modes change, or if an
+  unfinished shell snapshot expires.
+- **PostToolUseFailure**, **Stop**, and **SessionEnd** finalize shell snapshots
+  whose normal post hook did not arrive. Claude normally finishes within its
+  SessionEnd hook. If its internal deadline expires, Turbocommit stores the
+  worktree in a hidden local rescue ref before starting a detached worker. The
+  worker can recreate a removed checkout at its recorded commit, but it leaves
+  the rescue intact if the original checkout identity or branch has changed.
+  Every completed deadline rescue remains reachable through a hidden local
+  safety ref, including detached-HEAD recovery. Codex preserves the transcript
+  and starts the normal commit and recovery path in a detached worker so it can
+  finish beyond Codex's three-second hook deadline. Read-only tracking is then
+  removed.
 - **SessionStart / SessionEnd** chain sessions across `/clear` boundaries
   so planning context survives into the eventual commit.
 - **PreCompact** on Codex buffers visible transcript context before compaction.
@@ -76,6 +93,8 @@ dirty, and excludes newly discovered embedded repositories. Existing tracked
 submodule gitlinks remain eligible so child commits can update their parent.
 During an active merge, cherry-pick, revert, or rebase, Git forbids partial
 commits, so Turbocommit commits the operation's resolved index as a whole.
+Recovered overlap evidence is deferred until the operation ends because its
+generic commit must remain path-scoped.
 
 Retry manifests created by older versions did not record path ownership. On
 upgrade, Turbocommit discards those unsafe retry entries and records a
@@ -127,10 +146,11 @@ brew uninstall turbocommit
 ## Where turbocommit goes in your hook chain
 
 `turbocommit install` adds one hook group per event for each installed harness.
-The hooks are fire-and-forget: they always exit 0 and never block the agent.
+The hooks ordinarily exit 0. A modifying PreToolUse hook denies the tool when
+turbocommit cannot safely coordinate with an in-progress recovery, so the
+agent can retry instead of making an unowned change.
 
 If you rearrange your hooks manually, the turbocommit hooks can go anywhere.
-Order doesn't matter since they never block.
 
 Codex users should restart Codex and run `/hooks` after install to review and
 trust the hook commands.
