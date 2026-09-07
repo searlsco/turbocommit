@@ -8,6 +8,10 @@ set -e
 # from its own cwd.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR \
   GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+# Tools that run this suite (prove_it's taskEnv by default) export
+# TURBOCOMMIT_DISABLED so their subprocesses never trigger turbocommit. This
+# suite IS turbocommit, so that variable would make every hook under test bail.
+unset TURBOCOMMIT_DISABLED
 trap 'rc=$?; command -v prove_it >/dev/null 2>&1 && prove_it record --name fast-tests --result $rc' EXIT
 npx standard --fix
 node --test $(ls test/*.test.js | grep -v integration)
