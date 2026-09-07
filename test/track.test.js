@@ -680,6 +680,81 @@ describe('handleTrack', () => {
     assert.equal(hasTrackedModifications(root, 'bash-session'), true)
   })
 
+  it('attributes paths an MCP tool dirtied without naming them', () => {
+    const named = path.join(root, 'App', 'New.swift')
+    const sideEffect = path.join(root, 'App.xcodeproj', 'project.pbxproj')
+    const mcp = {
+      sessionId: 'mcp-session',
+      toolUseId: 'mcp-1',
+      cwd: root,
+      toolName: 'mcp__xcode__XcodeWrite',
+      toolInput: { filePath: 'App/New.swift', content: 'struct New {}' }
+    }
+
+    handleTrack(mcp, root)
+    fs.mkdirSync(path.dirname(named), { recursive: true })
+    fs.writeFileSync(named, 'struct New {}')
+    fs.mkdirSync(path.dirname(sideEffect), { recursive: true })
+    fs.writeFileSync(sideEffect, 'project')
+    handlePostTrack(mcp, root)
+
+    const entries = readTracking(root, 'mcp-session')
+    assert.deepEqual(entries.map(entry => entry.tool), ['mcp__xcode__XcodeWrite', 'mcp__xcode__XcodeWrite'])
+    assert.deepEqual(entries[0].rawFiles, ['App/New.swift'])
+    const post = entries[1]
+    assert.equal(post.phase, 'post')
+    assert.deepEqual(post.files.map(file => path.relative(fs.realpathSync(root), file)).sort(), [
+      'App.xcodeproj/project.pbxproj',
+      'App/New.swift'
+    ])
+  })
+
+  it('does not attribute another session\'s edit made during an MCP call', () => {
+    const theirs = path.join(root, 'theirs.swift')
+    const mine = path.join(root, 'mine.swift')
+    const mcp = {
+      sessionId: 'mcp-session',
+      toolUseId: 'mcp-1',
+      cwd: root,
+      toolName: 'mcp__xcode__XcodeWrite',
+      toolInput: { filePath: 'mine.swift', content: 'mine' }
+    }
+
+    handleTrack(mcp, root)
+    handleTrack({
+      sessionId: 'edit-session',
+      cwd: root,
+      toolName: 'Edit',
+      toolInput: { file_path: theirs }
+    }, root)
+    fs.writeFileSync(theirs, 'edited by the other session')
+    fs.writeFileSync(mine, 'mine')
+    handlePostTrack(mcp, root)
+
+    const owned = readTracking(root, 'mcp-session')
+      .flatMap(entry => entry.files || [])
+      .map(file => path.basename(file))
+    assert.deepEqual([...new Set(owned)], ['mine.swift'])
+    assert.equal(hasTrackedModifications(root, 'edit-session'), true)
+  })
+
+  it('does not count a pathless MCP post entry as a modification', () => {
+    const mcp = {
+      sessionId: 'mcp-readonly',
+      toolUseId: 'mcp-1',
+      cwd: root,
+      toolName: 'mcp__xcode__XcodeListSchemes',
+      toolInput: { workspaceIdentifier: 'w' }
+    }
+    handleTrack(mcp, root)
+    handlePostTrack(mcp, root)
+
+    const entries = readTracking(root, 'mcp-readonly')
+    assert.equal(entries.length, 2)
+    assert.equal(hasTrackedModifications(root, 'mcp-readonly'), true, 'a pathless MCP pre entry still marks the turn')
+    assert.equal(entries[1].files, undefined)
+  })
+
   it('records MCP tool even without extractable file path', () => {
     handleTrack(makeInput({
       tool_name: 'mcp__xcode__XcodeEdit',
@@ -857,6 +932,15 @@ describe('extractFilePath', () => {
 })
 
 describe('extractFilePaths', () => {
+  it('claims both ends of a move', () => {
+    const paths = extractFilePaths('mcp__xcode__XcodeMV', {
+      sourcePath: 'App/Old.swift',
+      destinationPath: 'Config/Old.swift',
+      operation: 'move'
+    }, '/repo')
+    assert.deepEqual(paths, ['/repo/App/Old.swift', '/repo/Config/Old.swift'])
+  })
+
   it('extracts nested Claude MultiEdit paths', () => {
     assert.deepEqual(extractFilePaths('MultiEdit', {
       edits: [

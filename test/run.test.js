@@ -558,6 +558,35 @@ describe('run', () => {
     )
   })
 
+  it('commits project files an MCP tool rewrote as a side effect', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    fs.mkdirSync(path.join(dir, 'App.xcodeproj'))
+    fs.writeFileSync(path.join(dir, 'App.xcodeproj', 'project.pbxproj'), 'before')
+    execSync('git add -A && git commit -q -m "Add project"', { cwd: dir, stdio: 'pipe' })
+
+    const mcp = {
+      sessionId: 'MCP',
+      toolUseId: 'mcp-1',
+      cwd: dir,
+      toolName: 'mcp__xcode__XcodeWrite',
+      toolInput: { filePath: 'New.swift', content: 'struct New {}' }
+    }
+    handleTrack(mcp, dir)
+    fs.writeFileSync(path.join(dir, 'New.swift'), 'struct New {}')
+    fs.writeFileSync(path.join(dir, 'App.xcodeproj', 'project.pbxproj'), 'after')
+    handlePostTrack(mcp, dir)
+
+    const transcript = makeTranscript([{ prompt: 'Add New.swift', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'MCP', transcriptPath: transcript, cwd: dir })
+
+    assert.equal(commitCount(dir), 3)
+    assert.deepEqual(
+      execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim().split('\n'),
+      ['App.xcodeproj/project.pbxproj', 'New.swift']
+    )
+  })
+
   it('commits shell changes to a path still claimed by a turn that never stopped', () => {
     const dir = makeRepo()
     enableAndCommit(dir)

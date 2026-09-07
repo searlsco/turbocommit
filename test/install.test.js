@@ -47,24 +47,24 @@ describe('install', () => {
     assert.ok(ptGroup.matcher.includes('mcp__'))
   })
 
-  it('installs a Bash-only PostToolUse hook', () => {
+  it('installs a snapshot-tool PostToolUse hook', () => {
     const file = tmpSettings({})
     install(file)
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
     const group = settings.hooks.PostToolUse.find(g =>
       g.hooks.some(h => h.command === 'turbocommit hook post-tool-use --harness claude')
     )
-    assert.equal(group.matcher, 'Bash')
+    assert.equal(group.matcher, 'Bash|mcp__.*')
   })
 
-  it('installs a Bash-only PostToolUseFailure hook', () => {
+  it('installs a snapshot-tool PostToolUseFailure hook', () => {
     const file = tmpSettings({})
     install(file)
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
     const group = settings.hooks.PostToolUseFailure.find(g =>
       g.hooks.some(h => h.command === 'turbocommit hook post-tool-use --harness claude')
     )
-    assert.equal(group.matcher, 'Bash')
+    assert.equal(group.matcher, 'Bash|mcp__.*')
   })
 
   it('gives Claude SessionEnd the maximum supported timeout', () => {
@@ -229,14 +229,14 @@ describe('installCodex', () => {
     assert.ok(CODEX_HOOK_DEFS.PreToolUse.matcher.includes('apply_patch'))
   })
 
-  it('installs a Bash-only PostToolUse hook', () => {
+  it('installs a snapshot-tool PostToolUse hook', () => {
     const file = tmpHooks({})
     installCodex(file)
     const hooks = JSON.parse(fs.readFileSync(file, 'utf8'))
     const group = hooks.hooks.PostToolUse.find(g =>
       g.hooks.some(h => h.command === 'turbocommit hook post-tool-use --harness codex')
     )
-    assert.equal(group.matcher, 'Bash')
+    assert.equal(group.matcher, 'Bash|mcp__.*')
   })
 
   it('installs all Codex hook events when no hooks exist', () => {

@@ -402,6 +402,7 @@ describe('multi-repository turns', () => {
       newString: 'worktree'
     }, 'codex')
     fs.writeFileSync(path.join(worktree, 'shared.txt'), 'worktree')
+    track(main, 'MAIN-SESSION', 'Write', { file_path: path.join(main, 'unrelated.txt') })
     fs.writeFileSync(path.join(main, 'unrelated.txt'), 'main session')
 
     stop(main, 'CODEX-WORKTREE', makeCodexTranscript('Change the worktree file'), 'codex')

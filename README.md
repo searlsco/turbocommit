@@ -25,8 +25,10 @@ turbocommit registers hooks with the harnesses you use:
 
 - **PreToolUse** tentatively claims the paths supplied to editing tools while
   recovery finishes, promotes the claim only when the tool may proceed, and
-  snapshots the repository before shell commands.
-- **PostToolUse** attributes paths that became dirty during a shell command.
+  snapshots the repository before shell commands and MCP tool calls.
+- **PostToolUse** attributes paths that became dirty during a shell command or
+  MCP tool call, so files a tool rewrites without naming them (an Xcode project
+  file, for example) belong to the session that changed them.
   Concurrent commands in one session share ownership. Commands from different
   sessions retain hashed overlap evidence instead of claiming each other's
   paths. Once every involved turn stops and no shell remains active in that
