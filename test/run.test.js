@@ -558,6 +558,40 @@ describe('run', () => {
     )
   })
 
+  it('commits shell changes to a path still claimed by a turn that never stopped', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    const claimed = path.join(dir, 'claimed.txt')
+    handleTrack({
+      sessionId: 'ABANDONED',
+      cwd: dir,
+      toolName: 'Write',
+      toolInput: { file_path: claimed }
+    }, dir)
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    fs.utimesSync(trackingPath(dir, 'ABANDONED'), twoHoursAgo, twoHoursAgo)
+
+    const bash = {
+      sessionId: 'SHELL',
+      toolUseId: 'bash-1',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'generate claimed.txt' }
+    }
+    handleTrack(bash, dir)
+    fs.writeFileSync(claimed, 'written by shell')
+    handlePostTrack(bash, dir)
+
+    const transcript = makeTranscript([{ prompt: 'Generate it', response: 'Done.' }])
+    run({ harness: 'claude', event: 'Stop', sessionId: 'SHELL', transcriptPath: transcript, cwd: dir })
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(
+      execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim(),
+      'claimed.txt'
+    )
+  })
+
   it('recovers unchanged paths after every overlapping shell owner stops', () => {
     const dir = makeRepo()
     enableAndCommit(dir)

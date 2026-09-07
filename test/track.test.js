@@ -26,6 +26,7 @@ const {
   extractFilePaths,
   trackingPath
 } = require('../lib/track')
+const { turbocommitDir } = require('../lib/session')
 
 function tmpRoot () {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-track-'))
@@ -626,6 +627,57 @@ describe('handleTrack', () => {
 
     assert.equal(hasTrackedModifications(root, 'bash-session'), false)
     assert.equal(hasTrackedModifications(root, 'edit-session'), true)
+  })
+
+  it('attributes a path whose other-session claim has been idle for over an hour', () => {
+    const claimed = path.join(root, 'claimed.txt')
+    handleTrack({
+      sessionId: 'abandoned-session',
+      cwd: root,
+      toolName: 'Write',
+      toolInput: { file_path: claimed }
+    }, root)
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    fs.utimesSync(trackingPath(root, 'abandoned-session'), twoHoursAgo, twoHoursAgo)
+
+    const bash = {
+      sessionId: 'bash-session',
+      toolUseId: 'bash-1',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'generate files' }
+    }
+    handleTrack(bash, root)
+    fs.writeFileSync(claimed, 'changed by bash session')
+    handlePostTrack(bash, root)
+
+    assert.equal(hasTrackedModifications(root, 'bash-session'), true)
+  })
+
+  it('ignores a preclaim left behind for over an hour', () => {
+    const claimed = path.join(root, 'claimed.txt')
+    const claimsDir = path.join(turbocommitDir(root), 'preclaims')
+    fs.mkdirSync(claimsDir, { recursive: true })
+    const stale = path.join(claimsDir, 'stale.json')
+    fs.writeFileSync(stale, JSON.stringify({
+      sessionId: 'crashed-session',
+      entry: { tool: 'Write', files: [claimed] }
+    }) + '\n')
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    fs.utimesSync(stale, twoHoursAgo, twoHoursAgo)
+
+    const bash = {
+      sessionId: 'bash-session',
+      toolUseId: 'bash-1',
+      cwd: root,
+      toolName: 'Bash',
+      toolInput: { command: 'generate files' }
+    }
+    handleTrack(bash, root)
+    fs.writeFileSync(claimed, 'changed by bash session')
+    handlePostTrack(bash, root)
+
+    assert.equal(hasTrackedModifications(root, 'bash-session'), true)
   })
 
   it('records MCP tool even without extractable file path', () => {

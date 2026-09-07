@@ -33,7 +33,9 @@ turbocommit registers hooks with the harnesses you use:
   checkout, unchanged and otherwise-unclaimed paths are committed separately
   as recovered shell changes. Evidence is scoped to its exact worktree and is
   permanently discarded if file contents or executable modes change, or if an
-  unfinished shell snapshot expires.
+  unfinished shell snapshot expires. Claims from a session whose turn has been
+  idle for over an hour no longer block shell attribution, so a turn that never
+  stopped cannot leave its paths unowned forever.
 - **PostToolUseFailure**, **Stop**, and **SessionEnd** finalize shell snapshots
   whose normal post hook did not arrive. Claude normally finishes within its
   SessionEnd hook. If its internal deadline expires, Turbocommit stores the
