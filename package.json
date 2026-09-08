@@ -1,6 +1,6 @@
 {
   "name": "@searls/turbocommit",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "description": "Auto-commit after every AI coding agent turn",
   "bin": {
     "turbocommit": "./cli.js"
