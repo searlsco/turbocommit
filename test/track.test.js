@@ -21,6 +21,7 @@ const {
   fingerprintTrackedPath,
   hasActiveBashSnapshot,
   hasTrackedModifications,
+  claimedPathsBySessions,
   cleanupTracking,
   extractFilePath,
   extractFilePaths,
@@ -777,6 +778,24 @@ describe('handleTrack', () => {
     assert.equal(hasTrackedModifications(root, 'sess-1'), true)
   })
 
+  it('leaves no claim behind when a denied MCP tool never runs', () => {
+    const release = acquireBashOverlapRecoveryLock(root)
+    try {
+      const tracked = handleTrack({
+        sessionId: 'sess-1',
+        toolUseId: 'mcp-1',
+        cwd: root,
+        toolName: 'mcp__xcode__XcodeWrite',
+        toolInput: { path: path.join(root, 'App', 'New.swift'), content: '' }
+      }, root, { recoveryWaitMs: 1 })
+      assert.equal(tracked, false)
+    } finally {
+      release()
+    }
+    assert.deepEqual(readTracking(root, 'sess-1'), [])
+    assert.equal(claimedPathsBySessions(root).size, 0)
+  })
+
   it('skips Bash with no command string', () => {
     handleTrack(makeInput({
       tool_name: 'Bash',
@@ -853,6 +872,30 @@ describe('shell commands that name other checkouts', () => {
     assert.deepEqual(entries.at(-1).rawFiles, [path.join(fs.realpathSync(other), 'package-lock.json')])
     assert.deepEqual(readTracking(other, 'sess-1'), [])
     assert.equal(hasTrackedModifications(anchor, 'sess-1'), true)
+  })
+
+  it('attributes only paths under what the command named in another checkout', () => {
+    fs.mkdirSync(path.join(other, 'Core'))
+    const input = bashInput('sess-1', 'bash-1', anchor, `cd ${other}/Core && swift package update`)
+    handleTrack(input, anchor)
+    fs.writeFileSync(path.join(other, 'Core', 'Package.resolved'), '{}')
+    fs.writeFileSync(path.join(other, 'human-notes.txt'), 'saved by a person meanwhile')
+    handlePostTrack(input, anchor)
+
+    assert.deepEqual(readTracking(anchor, 'sess-1').at(-1).rawFiles, [path.join(fs.realpathSync(other), 'Core', 'Package.resolved')])
+  })
+
+  it('leaves no claim or checkout behind when the shell tool is denied', () => {
+    const release = acquireBashOverlapRecoveryLock(other)
+    try {
+      const input = bashInput('sess-1', 'bash-1', anchor, `cd ${other} && generate lockfile`)
+      assert.equal(handleTrack(input, anchor, { recoveryWaitMs: 1 }), false)
+    } finally {
+      release()
+    }
+    assert.deepEqual(readTracking(anchor, 'sess-1'), [])
+    assert.equal(hasActiveBashSnapshot(anchor), false)
+    assert.equal(hasActiveBashSnapshot(other), false)
   })
 
   it('ignores another checkout whose own config disables turbocommit', () => {

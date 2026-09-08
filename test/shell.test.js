@@ -30,23 +30,41 @@ describe('shellCheckouts', () => {
 
   after(() => { process.env.HOME = realHome })
 
-  it('finds a checkout from an absolute path inside it', () => {
+  it('finds a checkout from an absolute path inside it and scopes it to that path', () => {
     const command = `sed -i '' 's/0.7.2/0.7.3/' ${other}/Core/Package.swift`
-    assert.deepEqual(shellCheckouts(command, anchor, anchor), [other])
+    assert.deepEqual(shellCheckouts(command, anchor, anchor), [
+      { root: other, paths: [path.join(other, 'Core', 'Package.swift')] }
+    ])
   })
 
   it('expands a tilde path to the home directory', () => {
-    assert.deepEqual(shellCheckouts('cd ~/code/other && swift package update', anchor, anchor), [other])
+    assert.deepEqual(shellCheckouts('cd ~/code/other && swift package update', anchor, anchor), [
+      { root: other, paths: [other] }
+    ])
   })
 
   it('resolves relative words against absolute directories the command names', () => {
     const third = makeRepo(path.join(home, 'code'), 'third')
     const command = `cd ${path.join(home, 'code')} && for r in other/Core third/Core; do (cd $r && swift package update); done`
-    assert.deepEqual(shellCheckouts(command, anchor, anchor), [other, third])
+    assert.deepEqual(shellCheckouts(command, anchor, anchor), [
+      { root: other, paths: [path.join(other, 'Core')] },
+      { root: third, paths: [path.join(third, 'Core')] }
+    ])
   })
 
   it('resolves relative words against the working directory', () => {
-    assert.deepEqual(shellCheckouts('cd ../other && npm install', anchor, anchor), [other])
+    assert.deepEqual(shellCheckouts('cd ../other && npm install', anchor, anchor), [{ root: other, paths: [other] }])
+  })
+
+  it('ignores bare words that happen to match a sibling checkout name', () => {
+    makeRepo(path.join(home, 'code'), 'docs')
+    const command = `cd ${path.join(home, 'code')} && echo "remember to check the other docs later"`
+    assert.deepEqual(shellCheckouts(command, anchor, anchor), [])
+  })
+
+  it('ignores a checkout with a merge in progress', () => {
+    fs.writeFileSync(path.join(other, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n')
+    assert.deepEqual(shellCheckouts(`cat ${other}/Core/Package.swift`, anchor, anchor), [])
   })
 
   it('ignores the anchor, disabled checkouts, and paths that do not exist', () => {
