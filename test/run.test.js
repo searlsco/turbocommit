@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execSync } = require('child_process')
+const { execSync, spawn } = require('child_process')
 const { run, runPreCompact, recoverBashOverlaps, formatModelName, resolveCoauthor, readClaudeAttribution } = require('../lib/run')
 const {
   handleTrack,
@@ -556,6 +556,37 @@ describe('run', () => {
       execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim(),
       'generated.txt'
     )
+  })
+
+  it('commits a file the session removed with git rm alongside its replacement', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    fs.writeFileSync(path.join(dir, 'Old.swift'), 'old')
+    execSync('git add -A && git commit -q -m "Add old"', { cwd: dir, stdio: 'pipe' })
+    const input = {
+      sessionId: 'GIT-RM',
+      toolUseId: 'bash-rm',
+      cwd: dir,
+      toolName: 'Bash',
+      toolInput: { command: 'git rm -q Old.swift && cat > New.swift' }
+    }
+    handleTrack(input, dir)
+    execSync('git rm -q Old.swift', { cwd: dir, stdio: 'pipe' })
+    fs.writeFileSync(path.join(dir, 'New.swift'), 'new')
+    handlePostTrack(input, dir)
+    const transcript = makeTranscript([{ prompt: 'Replace Old with New', response: 'Done.' }])
+
+    withCwd(dir, () => {
+      run({ harness: 'claude', event: 'Stop', sessionId: 'GIT-RM', transcriptPath: transcript, cwd: dir })
+    })
+
+    assert.equal(commitCount(dir), 3)
+    assert.equal(
+      execSync('git show --format= --name-status HEAD', { cwd: dir, encoding: 'utf8' }).trim(),
+      'A\tNew.swift\nD\tOld.swift'
+    )
+    assert.equal(execSync('git status --porcelain', { cwd: dir, encoding: 'utf8' }).trim(), '')
+    assert.deepEqual(readTracking(dir, 'GIT-RM'), [])
   })
 
   it('commits project files an MCP tool rewrote as a side effect', () => {
@@ -1897,6 +1928,51 @@ describe('run monitor events', () => {
     assert.ok(entries.length >= 2, `expected at least 2 entries, got ${entries.length}`)
     assert.equal(entries[0].event, 'start')
     assert.equal(entries[entries.length - 1].event, 'fail')
+    assert.match(entries[entries.length - 1].error, /index\.lock/)
+  })
+
+  it('retries a commit blocked by a transient index lock', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'content')
+    trackWrite(dir, 'S1', path.join(dir, 'file.txt'))
+    const lock = path.join(dir, '.git', 'index.lock')
+    fs.writeFileSync(lock, '')
+    spawn('sh', ['-c', `sleep 0.3; rm -f '${lock}'`], { detached: true, stdio: 'ignore' }).unref()
+    const transcript = makeTranscript([{ prompt: 'Survive the lock', response: 'Done.' }])
+
+    withCwd(dir, () => {
+      run(JSON.stringify({ transcript_path: transcript, session_id: 'S1' }))
+    })
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(readLog().at(-1).event, 'success')
+  })
+
+  it('retains work a failed commit could not land and commits it on a later Stop', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    fs.writeFileSync(path.join(dir, 'file.txt'), 'content')
+    trackWrite(dir, 'S1', path.join(dir, 'file.txt'))
+    const lock = path.join(dir, '.git', 'index.lock')
+    fs.writeFileSync(lock, '')
+    const transcript = makeTranscript([{ prompt: 'Will fail first', response: 'Boom.' }])
+    assert.throws(() => withCwd(dir, () => {
+      run(JSON.stringify({ transcript_path: transcript, session_id: 'S1' }))
+    }))
+    fs.unlinkSync(lock)
+    assert.deepEqual(readTracking(dir, 'S1'), [])
+    assert.equal(commitCount(dir), 1)
+
+    const later = makeTranscript([{ prompt: 'Unrelated later turn', response: 'Nothing to do.' }])
+    withCwd(dir, () => {
+      run(JSON.stringify({ transcript_path: later, session_id: 'S2' }))
+    })
+
+    assert.equal(commitCount(dir), 2)
+    assert.equal(execSync('git show --format= --name-only HEAD', { cwd: dir, encoding: 'utf8' }).trim(), 'file.txt')
+    assert.match(execSync('git log -1 --format=%B', { cwd: dir, encoding: 'utf8' }), /Will fail first/)
+    assert.equal(execSync('git status --porcelain', { cwd: dir, encoding: 'utf8' }).trim(), '')
   })
 
   it('commits even when logEvent fails', () => {

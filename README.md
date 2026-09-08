@@ -80,8 +80,14 @@ Each touched checkout:
 - Gives the configured title agent repository-specific bounded diff context.
 
 Turbocommit attempts every commit before pushing every successful commit whose
-repository has `push: true`. Failures are retained and retried on a later Stop,
-along with every transcript accumulated before the commit succeeds.
+repository has `push: true`. Staging and committing are retried a few times
+when Git is momentarily unavailable, for example while Xcode holds the index
+lock. Failures are retained and retried on a later Stop in that checkout by
+any session, along with every transcript accumulated before the commit
+succeeds, and the failed session's claims are released so they do not block
+other sessions meanwhile. Each `fail` monitor event records Git's error. A
+deletion the session already staged with `git rm` is committed with the rest
+of its paths.
 
 Separate worktrees are committed independently. Enabled submodules are
 committed and pushed before enabled parent repositories. When one turn creates

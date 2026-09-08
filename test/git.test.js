@@ -153,6 +153,21 @@ describe('path-scoped commits', () => {
     assert.match(execSync('git status --short -- a.txt', { cwd: dir, encoding: 'utf8' }), /^ M a\.txt/m)
   })
 
+  it('commits a deletion the session already staged with git rm alongside a new file', () => {
+    const dir = makeRepoWithCommit()
+    fs.writeFileSync(path.join(dir, 'old.txt'), 'old')
+    execSync('git add -A && git commit -q -m "add old"', { cwd: dir, stdio: 'pipe' })
+    execSync('git rm -q old.txt', { cwd: dir, stdio: 'pipe' })
+    fs.writeFileSync(path.join(dir, 'new.txt'), 'new')
+
+    const sha = commitPaths(dir, [path.join(dir, 'old.txt'), path.join(dir, 'new.txt')], 'Replace old with new', 'body')
+
+    assert.ok(sha)
+    const files = execSync('git diff-tree --no-commit-id --name-status -r HEAD', { cwd: dir, encoding: 'utf8' }).trim()
+    assert.equal(files, 'A\tnew.txt\nD\told.txt')
+    assert.equal(execSync('git status --porcelain', { cwd: dir, encoding: 'utf8' }).trim(), '')
+  })
+
   it('does not stage an untracked linked worktree from a broad directory path', () => {
     const dir = makeRepoWithCommit()
     const worktree = path.join(dir, '.codex', 'worktrees', 'nested')
