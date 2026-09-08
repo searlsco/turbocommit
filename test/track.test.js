@@ -1,4 +1,4 @@
-const { describe, it, beforeEach } = require('node:test')
+const { describe, it, beforeEach, after } = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
@@ -816,6 +816,84 @@ describe('handleTrack', () => {
     const entries = readTracking(root, 'sess-1')
     assert.equal(entries.length, 1)
     assert.deepEqual(entries[0].files, ['/tmp/nb.ipynb'])
+  })
+})
+
+describe('shell commands that name other checkouts', () => {
+  const realHome = process.env.HOME
+  let anchor, other
+
+  function enabledRepo () {
+    const root = tmpRoot()
+    fs.writeFileSync(path.join(root, '.turbocommit.json'), JSON.stringify({ enabled: true }))
+    execSync('git add .turbocommit.json && git commit -q -m enable', { cwd: root, stdio: 'pipe' })
+    return root
+  }
+
+  function bashInput (sessionId, toolUseId, cwd, command) {
+    return { sessionId, toolUseId, cwd, toolName: 'Bash', toolInput: { command } }
+  }
+
+  beforeEach(() => {
+    process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-track-home-'))
+    anchor = enabledRepo()
+    other = enabledRepo()
+  })
+
+  after(() => { process.env.HOME = realHome })
+
+  it('attributes shell changes in another enabled checkout to the anchor session', () => {
+    const input = bashInput('sess-1', 'bash-1', anchor, `cd ${other} && generate lockfile`)
+    handleTrack(input, anchor)
+    fs.writeFileSync(path.join(other, 'package-lock.json'), '{}')
+    handlePostTrack(input, anchor)
+
+    const entries = readTracking(anchor, 'sess-1')
+    assert.deepEqual(entries[0].checkouts, [fs.realpathSync(other)])
+    assert.deepEqual(entries.at(-1).rawFiles, [path.join(fs.realpathSync(other), 'package-lock.json')])
+    assert.deepEqual(readTracking(other, 'sess-1'), [])
+    assert.equal(hasTrackedModifications(anchor, 'sess-1'), true)
+  })
+
+  it('ignores another checkout whose own config disables turbocommit', () => {
+    fs.writeFileSync(path.join(other, '.turbocommit.json'), JSON.stringify({ enabled: false }))
+    const input = bashInput('sess-1', 'bash-1', anchor, `cd ${other} && generate lockfile`)
+    handleTrack(input, anchor)
+    fs.writeFileSync(path.join(other, 'package-lock.json'), '{}')
+    handlePostTrack(input, anchor)
+
+    assert.equal(readTracking(anchor, 'sess-1')[0].checkouts, undefined)
+    assert.equal(hasTrackedModifications(anchor, 'sess-1'), false)
+  })
+
+  it('records an overlap instead of stealing from a shell running in that checkout', () => {
+    const remote = bashInput('session-a', 'bash-a', anchor, `cd ${other} && generate a`)
+    const local = bashInput('session-b', 'bash-b', other, 'generate b')
+    handleTrack(remote, anchor)
+    handleTrack(local, other)
+    fs.writeFileSync(path.join(other, 'a.txt'), 'a')
+    handlePostTrack(remote, anchor)
+    handlePostTrack(local, other)
+
+    assert.equal(hasTrackedModifications(anchor, 'session-a'), false)
+    assert.equal(hasTrackedModifications(other, 'session-b'), false)
+    assert.deepEqual(readReadyBashOverlaps(other), [])
+
+    recordBashSessionStop(anchor, 'session-a')
+    recordBashSessionStop(other, 'session-b')
+    const ready = readReadyBashOverlaps(other)
+    assert.equal(ready.length, 1)
+    assert.deepEqual(ready[0].paths.map(item => item.path), [path.join(fs.realpathSync(other), 'a.txt')])
+  })
+
+  it('finalizes an abandoned shell snapshot in another checkout at Stop', () => {
+    const input = bashInput('sess-1', 'bash-1', anchor, `cd ${other} && generate before interruption`)
+    handleTrack(input, anchor)
+    fs.writeFileSync(path.join(other, 'generated.txt'), 'generated')
+
+    assert.equal(finalizeBashSnapshots(anchor, 'sess-1'), 2)
+    assert.equal(hasActiveBashSnapshot(other), false)
+    assert.deepEqual(readTracking(anchor, 'sess-1').at(-1).rawFiles, [path.join(fs.realpathSync(other), 'generated.txt')])
   })
 })
 

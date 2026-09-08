@@ -638,6 +638,31 @@ describe('multi-repository turns', () => {
     assert.deepEqual(changedFiles(root), ['package-lock.json'])
   })
 
+  it('commits shell changes made in another enabled checkout the command names', () => {
+    const anchor = makeRepo('bash-anchor')
+    const other = makeRepo('bash-other')
+    const transcript = makeClaudeTranscript('Bump the pin in the sibling app')
+    const input = {
+      session_id: 'BASH-SIBLING',
+      tool_use_id: 'bash-sibling-1',
+      transcript_path: transcript,
+      cwd: anchor,
+      tool_name: 'Bash',
+      tool_input: { command: `cd ${other} && sed -i '' 's/0.7.2/0.7.3/' Package.swift && swift package update` }
+    }
+
+    hook(anchor, 'pre-tool-use', 'claude', input)
+    fs.writeFileSync(path.join(other, 'Package.swift'), '// 0.7.3')
+    fs.writeFileSync(path.join(other, 'Package.resolved'), '{}')
+    hook(anchor, 'post-tool-use', 'claude', input)
+    hook(anchor, 'stop', 'claude', input)
+
+    assert.equal(count(anchor), 1)
+    assert.equal(count(other), 2)
+    assert.deepEqual(changedFiles(other).sort(), ['Package.resolved', 'Package.swift'])
+    assert.match(body(other), /Bump the pin in the sibling app/)
+  })
+
   it('commits an enabled submodule before its enabled parent', () => {
     const source = makeRepo('source')
     const parent = makeRepo('parent')

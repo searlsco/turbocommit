@@ -28,7 +28,11 @@ turbocommit registers hooks with the harnesses you use:
   snapshots the repository before shell commands and MCP tool calls.
 - **PostToolUse** attributes paths that became dirty during a shell command or
   MCP tool call, so files a tool rewrites without naming them (an Xcode project
-  file, for example) belong to the session that changed them.
+  file, for example) belong to the session that changed them. A shell command
+  that names a path inside another enabled checkout (absolute, `~`-relative, or
+  relative to a directory the command mentions) is snapshotted in that checkout
+  too, so a pin bump made with `sed` in a sibling repository is attributed and
+  committed there.
   Concurrent commands in one session share ownership. Commands from different
   sessions retain hashed overlap evidence instead of claiming each other's
   paths. Once every involved turn stops and no shell remains active in that
@@ -61,8 +65,8 @@ turbocommit registers hooks with the harnesses you use:
 A session that starts in an enabled repository can commit changes in other
 enabled local checkouts during the same turn. Turbocommit discovers each
 checkout from explicit file paths supplied to Claude Code tools, Codex
-`apply_patch`, and path-bearing MCP tools. Shell commands alone do not discover
-additional repositories.
+`apply_patch`, and path-bearing MCP tools, and from paths named in shell
+commands that resolve inside another enabled checkout.
 
 Each touched checkout:
 
