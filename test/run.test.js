@@ -1020,6 +1020,26 @@ describe('run', () => {
     assert.ok(body.indexOf('## Planning') < body.indexOf('## Implementation'))
   })
 
+  it('caps oversized pending context in the actual commit and preserves attribution', () => {
+    const dir = makeRepo()
+    enableAndCommit(dir)
+    savePending(dir, 'A', 'Planning start\n' + '日'.repeat(170000))
+    writeChain(dir, 'B', 'A', ['A'])
+    trackWrite(dir, 'B', path.join(dir, 'result.txt'))
+    fs.writeFileSync(path.join(dir, 'result.txt'), 'done')
+    const transcript = makeTranscript([{ prompt: 'Implement findings', response: 'Created file.' }], { model: 'claude-sonnet-4-5' })
+    withCwd(dir, () => {
+      run(JSON.stringify({ transcript_path: transcript, session_id: 'B' }))
+    })
+    const body = lastBody(dir)
+    assert.ok(Buffer.byteLength(body) < 17000)
+    assert.ok(body.includes('[... transcript truncated ...]'))
+    assert.ok(body.includes('Planning start'))
+    assert.ok(body.includes('Created file.'))
+    assert.ok(body.includes('Co-Authored-By:'))
+    assert.ok(!body.includes('�'))
+  })
+
   it('picks up pending from multi-ancestor chain', () => {
     const dir = makeRepo()
     enableAndCommit(dir)

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { parseTranscript, parseCodexTranscript, formatBody, formatTitleTranscript, extractHeadline, fallbackHeadline, extractModel, extractCodexModel } = require('../lib/transcript')
+const { parseTranscript, parseCodexTranscript, formatBody, capTranscript, formatTitleTranscript, extractHeadline, fallbackHeadline, extractModel, extractCodexModel } = require('../lib/transcript')
 
 function tmpJsonl (lines) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-transcript-'))
@@ -403,5 +403,27 @@ describe('extractCodexModel', () => {
     ])
 
     assert.equal(extractCodexModel(file), 'gpt-5.4')
+  })
+})
+
+describe('transcript byte limit', () => {
+  it('preserves short transcripts exactly', () => {
+    assert.equal(capTranscript('Prompt: hello\nResponse: goodbye'), 'Prompt: hello\nResponse: goodbye')
+  })
+
+  it('caps a huge turn while retaining its beginning and end', () => {
+    const result = formatBody([{ prompt: 'START' + 'x'.repeat(500000), response: 'END' }])
+    assert.ok(Buffer.byteLength(result) <= 16384)
+    assert.ok(result.startsWith('Prompt:\nSTART'))
+    assert.ok(result.endsWith('Response:\nEND'))
+    assert.ok(result.includes('[... transcript truncated ...]'))
+  })
+
+  it('caps combined transcripts without splitting Unicode characters', () => {
+    const body = formatBody([{ prompt: '日本語'.repeat(10000), response: '😀'.repeat(10000) }])
+    const result = capTranscript([body, body, body].join('\n'))
+    assert.ok(Buffer.byteLength(result) <= 16384)
+    assert.ok(!result.includes('�'))
+    assert.ok(result.endsWith('😀'))
   })
 })
