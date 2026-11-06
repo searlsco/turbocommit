@@ -437,6 +437,46 @@ describe('handleTrack', () => {
     assert.deepEqual(readReadyBashOverlaps(root), [])
   })
 
+  it('prunes expired snapshots left by a removed worktree', () => {
+    const ageSnapshot = (snapshotPath, field) => {
+      const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'))
+      snapshot[field] = Date.now() - 2 * 60 * 60 * 1000
+      fs.writeFileSync(snapshotPath, JSON.stringify(snapshot) + '\n')
+    }
+    const shell = (wt, sessionId) => ({
+      sessionId,
+      toolUseId: 'bash-1',
+      cwd: wt,
+      toolName: 'Bash',
+      toolInput: { command: 'echo hi' }
+    })
+    const removed = tmpWorktree(root, 'removed-wt')
+    const recent = tmpWorktree(root, 'recent-wt')
+    const live = tmpWorktree(root, 'live-wt')
+    const ended = shell(removed, 'removed-ended')
+    const abandoned = shell(removed, 'removed-abandoned')
+    const fresh = shell(recent, 'recent-ended')
+    const living = shell(live, 'live-ended')
+    for (const input of [ended, abandoned, fresh, living]) handleTrack(input, input.cwd)
+    for (const input of [ended, fresh, living]) handlePostTrack(input, input.cwd)
+    const endedPath = bashSnapshotPath(removed, ended.sessionId, ended.toolUseId)
+    const abandonedPath = bashSnapshotPath(removed, abandoned.sessionId, abandoned.toolUseId)
+    const freshPath = bashSnapshotPath(recent, fresh.sessionId, fresh.toolUseId)
+    const livingPath = bashSnapshotPath(live, living.sessionId, living.toolUseId)
+    ageSnapshot(endedPath, 'endedAt')
+    ageSnapshot(abandonedPath, 'startedAt')
+    ageSnapshot(livingPath, 'endedAt')
+    execSync(`git worktree remove --force "${removed}"`, { cwd: root, stdio: 'pipe' })
+    execSync(`git worktree remove --force "${recent}"`, { cwd: root, stdio: 'pipe' })
+
+    pruneBashSnapshots(root)
+
+    assert.equal(fs.existsSync(endedPath), false)
+    assert.equal(fs.existsSync(abandonedPath), false)
+    assert.equal(fs.existsSync(freshPath), true)
+    assert.equal(fs.existsSync(livingPath), true)
+  })
+
   it('makes cross-session overlap recoverable only after every owner stops', () => {
     const a = {
       sessionId: 'session-a',
