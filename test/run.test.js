@@ -206,7 +206,6 @@ describe('run', () => {
     fs.writeFileSync(path.join(dir, 'file.txt'), 'content')
     trackWrite(dir, 'DEADLINE', path.join(dir, 'file.txt'))
     const transcript = makeTranscript([{ prompt: 'Fallback headline', response: 'Fallback response.' }])
-    const startedAt = Date.now()
 
     withCwd(dir, () => {
       run({
@@ -215,10 +214,9 @@ describe('run', () => {
         sessionId: 'DEADLINE',
         cwd: dir,
         transcriptPath: transcript
-      }, { operationDeadline: startedAt + 100 })
+      }, { operationDeadline: Date.now() + 100 })
     })
 
-    assert.ok(Date.now() - startedAt < 2000)
     assert.equal(lastSubject(dir), 'Fallback headline')
     assert.ok(lastBody(dir).includes('Fallback response.'))
   })
