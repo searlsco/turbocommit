@@ -617,6 +617,121 @@ describe('multi-repository turns', () => {
     assert.deepEqual(changedFiles(main), ['exact.txt'])
   })
 
+  it('leaves a subagent\'s edits in its own worktree for that agent to commit', () => {
+    const main = makeRepo('subagent-worktree')
+    const worktree = path.join(main, '.claude', 'worktrees', 'agent-a1')
+    execSync(`git worktree add -q -b worktree-agent-a1 "${worktree}"`, { cwd: main })
+    const transcript = makeClaudeTranscript('Coordinate an unrelated task')
+    const session = { session_id: 'SUBAGENT-WORKTREE', transcript_path: transcript }
+    const subagent = { ...session, cwd: worktree, agent_id: 'a1', agent_type: 'general-purpose' }
+    const edit = { ...subagent, tool_name: 'Edit', tool_input: { file_path: path.join(worktree, 'README.md') } }
+    const shell = { ...subagent, tool_use_id: 'subagent-shell-1', tool_name: 'Bash', tool_input: { command: 'echo shell > shell.txt' } }
+
+    hook(worktree, 'pre-tool-use', 'claude', edit)
+    fs.writeFileSync(path.join(worktree, 'README.md'), 'in progress')
+    hook(worktree, 'pre-tool-use', 'claude', shell)
+    fs.writeFileSync(path.join(worktree, 'shell.txt'), 'shell')
+    hook(worktree, 'post-tool-use', 'claude', shell)
+    hook(main, 'stop', 'claude', { ...session, cwd: main })
+
+    assert.equal(count(main), 1)
+    assert.equal(count(worktree), 1)
+    assert.equal(
+      execSync('git status --short', { cwd: worktree, encoding: 'utf8' }),
+      ' M README.md\n?? shell.txt\n'
+    )
+  })
+
+  it('commits the session\'s own edit without a worktree subagent\'s edit', () => {
+    const main = makeRepo('subagent-beside-session')
+    const worktree = path.join(main, '.claude', 'worktrees', 'agent-a2')
+    execSync(`git worktree add -q -b worktree-agent-a2 "${worktree}"`, { cwd: main })
+    const session = {
+      session_id: 'SUBAGENT-BESIDE-SESSION',
+      transcript_path: makeClaudeTranscript('Edit the coordinator checkout')
+    }
+
+    hook(worktree, 'pre-tool-use', 'claude', {
+      ...session,
+      cwd: worktree,
+      agent_id: 'a2',
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(worktree, 'worker.txt') }
+    })
+    hook(main, 'pre-tool-use', 'claude', {
+      ...session,
+      cwd: main,
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(main, 'own.txt') }
+    })
+    fs.writeFileSync(path.join(worktree, 'worker.txt'), 'worker')
+    fs.writeFileSync(path.join(main, 'own.txt'), 'own')
+    hook(main, 'stop', 'claude', { ...session, cwd: main })
+
+    assert.equal(count(main), 2)
+    assert.deepEqual(changedFiles(main), ['own.txt'])
+    assert.equal(count(worktree), 1)
+  })
+
+  it('leaves a subagent\'s worktree alone when the session\'s shell command names it', () => {
+    const main = makeRepo('subagent-inspected')
+    const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tc-multi-agent-worktree-')), 'agent-a4')
+    execSync(`git worktree add -q -b worktree-agent-a4 "${worktree}"`, { cwd: main })
+    const session = {
+      session_id: 'SUBAGENT-INSPECTED',
+      transcript_path: makeClaudeTranscript('Check on the worker')
+    }
+    const subagentShell = {
+      ...session,
+      cwd: worktree,
+      agent_id: 'a4',
+      tool_use_id: 'worker-shell-1',
+      tool_name: 'Bash',
+      tool_input: { command: 'script/generate' }
+    }
+    const inspect = {
+      ...session,
+      cwd: main,
+      tool_use_id: 'coordinator-shell-1',
+      tool_name: 'Bash',
+      tool_input: { command: `git -C ${worktree} status` }
+    }
+
+    hook(worktree, 'pre-tool-use', 'claude', subagentShell)
+    hook(main, 'pre-tool-use', 'claude', inspect)
+    fs.writeFileSync(path.join(worktree, 'generated.txt'), 'in progress')
+    hook(main, 'post-tool-use', 'claude', inspect)
+    hook(main, 'stop', 'claude', { ...session, cwd: main })
+
+    assert.equal(count(main), 1)
+    assert.equal(count(worktree), 1)
+  })
+
+  it('commits a subagent\'s edits made in the session\'s own checkout', () => {
+    const main = makeRepo('subagent-shared-checkout')
+    const session = {
+      session_id: 'SUBAGENT-SHARED',
+      transcript_path: makeClaudeTranscript('Delegate an edit in place'),
+      cwd: main
+    }
+    const shell = { ...session, agent_id: 'a3', tool_use_id: 'shared-shell-1', tool_name: 'Bash', tool_input: { command: 'echo shell > shell.txt' } }
+
+    hook(main, 'pre-tool-use', 'claude', {
+      ...session,
+      agent_id: 'a3',
+      tool_name: 'Write',
+      tool_input: { file_path: path.join(main, 'delegated.txt') }
+    })
+    fs.writeFileSync(path.join(main, 'delegated.txt'), 'delegated')
+    hook(main, 'pre-tool-use', 'claude', shell)
+    fs.writeFileSync(path.join(main, 'shell.txt'), 'shell')
+    hook(main, 'post-tool-use', 'claude', shell)
+    hook(main, 'stop', 'claude', session)
+
+    assert.equal(count(main), 2)
+    assert.deepEqual(changedFiles(main).sort(), ['delegated.txt', 'shell.txt'])
+  })
+
   it('commits a shell-generated path captured by PostToolUse', () => {
     const root = makeRepo('bash-generated')
     const transcript = makeClaudeTranscript('Install dependencies')
