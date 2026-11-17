@@ -94,6 +94,11 @@ committed and pushed before enabled parent repositories. When one turn creates
 commits in multiple repositories, each commit includes a shared
 `Turbocommit-Session` trailer.
 
+A Claude Code subagent that works in a worktree of its own (`isolation:
+"worktree"`) keeps its changes: the parent session's turn never commits
+anything in that worktree, so the subagent commits its own work. A subagent
+that shares the session's checkout is committed with the session's turn.
+
 Relative tool paths are matched to the checkout where that path changed. If the
 same relative path is dirty in multiple worktrees, Turbocommit skips the turn
 with an `ambiguous-tracking` monitor reason instead of guessing which checkout
